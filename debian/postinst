@@ -4,7 +4,14 @@ set -e
 # The app draws to /dev/fb0 and reads the matrix keyboard, so the desktop
 # user needs the video and input groups. Group changes only apply to new
 # sessions, hence the restart hint below.
-USER_NAME=$(getent passwd 1000 | cut -d: -f1 || true)
+USER_NAME=${SUDO_USER:-}
+if [ -z "$USER_NAME" ] || [ "$USER_NAME" = "root" ]; then
+    USER_NAME=$(getent passwd 1000 | cut -d: -f1 || true)
+fi
+if [ -z "$USER_NAME" ] && getent passwd pi >/dev/null 2>&1; then
+    USER_NAME=pi
+fi
+
 if [ -n "$USER_NAME" ]; then
     for grp in video input; do
         if getent group "$grp" >/dev/null 2>&1; then
@@ -13,6 +20,11 @@ if [ -n "$USER_NAME" ]; then
             fi
         fi
     done
+fi
+
+# Make the launcher pick up the new desktop entry.
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl try-restart APPLaunch.service 2>/dev/null || true
 fi
 
 exit 0
