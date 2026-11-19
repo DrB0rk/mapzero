@@ -107,6 +107,26 @@ class FramebufferFormatTest(unittest.TestCase):
     class FakeFd:
         pass
 
+    def test_structs_are_big_enough_for_the_kernel(self):
+        """The ioctl copies whole structures into the caller's buffer.
+
+        A struct that stops early makes the kernel write past the end of
+        it, which CPython reports as "buffer overflow". The sizes below are
+        the kernel's own sizeof() for these structures.
+        """
+        self.assertGreaterEqual(ctypes.sizeof(mapzero.FbVarScreeninfo), 160)
+        self.assertGreaterEqual(ctypes.sizeof(mapzero.FbFixScreeninfo), 80)
+
+    def test_a_short_buffer_does_not_crash_the_app(self):
+        """A panel the kernel cannot describe must not take the app down."""
+        import fcntl
+
+        def fake_ioctl(fd, request, buf, mutate):
+            raise SystemError("buffer overflow")
+
+        with unittest.mock.patch("fcntl.ioctl", side_effect=fake_ioctl):
+            self.assertIsNone(mapzero.read_framebuffer(self.FakeFd()))
+
     def check(self, **kwargs):
         var, fix = fb_info(**kwargs)
 

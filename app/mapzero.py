@@ -321,10 +321,12 @@ class FbBitfield(ctypes.Structure):
 
 
 class FbVarScreeninfo(ctypes.Structure):
-    """The head of struct fb_var_screeninfo, as the kernel writes it.
+    """struct fb_var_screeninfo, exactly as the kernel writes it.
 
-    Every field up to the bitfields is a fixed width integer, so this layout
-    is the same on 32 and 64 bit.
+    The whole structure must be declared: the ioctl copies sizeof(var) bytes
+    into the caller's buffer, so a struct that stops early makes the kernel
+    write past the end of it. Every field is a fixed width integer, so the
+    layout is the same on 32 and 64 bit.
     """
 
     _fields_ = [
@@ -340,6 +342,23 @@ class FbVarScreeninfo(ctypes.Structure):
         ("green", FbBitfield),
         ("blue", FbBitfield),
         ("transp", FbBitfield),
+        ("nonstd", ctypes.c_uint32),
+        ("activate", ctypes.c_uint32),
+        ("height", ctypes.c_uint32),
+        ("width", ctypes.c_uint32),
+        ("accel_flags", ctypes.c_uint32),
+        ("pixclock", ctypes.c_uint32),
+        ("left_margin", ctypes.c_uint32),
+        ("right_margin", ctypes.c_uint32),
+        ("upper_margin", ctypes.c_uint32),
+        ("lower_margin", ctypes.c_uint32),
+        ("hsync_len", ctypes.c_uint32),
+        ("vsync_len", ctypes.c_uint32),
+        ("sync", ctypes.c_uint32),
+        ("vmode", ctypes.c_uint32),
+        ("rotate", ctypes.c_uint32),
+        ("colorspace", ctypes.c_uint32),
+        ("reserved", ctypes.c_uint32 * 4),
     ]
 
 
@@ -381,14 +400,16 @@ def read_framebuffer(fd):
     var = FbVarScreeninfo()
     try:
         fcntl.ioctl(fd, FBIOGET_VSCREENINFO, var, True)
-    except (OSError, ValueError):
+    except (OSError, ValueError, SystemError):
+        # SystemError means the kernel had more to write than the buffer
+        # held. Treat the panel as unknown rather than crashing.
         return None
     fix = FbFixScreeninfo()
     stride = 0
     try:
         fcntl.ioctl(fd, FBIOGET_FSCREENINFO, fix, True)
         stride = fix.line_length
-    except (OSError, ValueError):
+    except (OSError, ValueError, SystemError):
         stride = 0
     return {
         "xres": var.xres, "yres": var.yres, "bpp": var.bits_per_pixel,
