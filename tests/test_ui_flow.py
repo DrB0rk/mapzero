@@ -100,6 +100,46 @@ class UiFlowTest(unittest.TestCase):
             finally:
                 topology.SAVE_DIR = original
 
+    def test_delete_asks_twice(self):
+        """One stray D must not wipe a saved map."""
+        import tempfile
+        original = topology.SAVE_DIR
+        with tempfile.TemporaryDirectory() as tmp:
+            topology.SAVE_DIR = tmp
+            try:
+                topo = topology.build_topology([], gateway="10.0.0.1")
+                topology.save_topology(topo, name="demo")
+                self.app.maps = topology.list_maps()
+                self.app.screen = "maps"
+
+                self.app.maps_keys(mapzero.KEY_D)
+                self.assertTrue(self.app.confirm_delete)
+                self.assertEqual(len(topology.list_maps()), 1)
+
+                self.app.maps_keys(mapzero.KEY_D)
+                self.assertFalse(self.app.confirm_delete)
+                self.assertEqual(len(topology.list_maps()), 0)
+            finally:
+                topology.SAVE_DIR = original
+
+    def test_escape_cancels_a_delete(self):
+        import tempfile
+        original = topology.SAVE_DIR
+        with tempfile.TemporaryDirectory() as tmp:
+            topology.SAVE_DIR = tmp
+            try:
+                topo = topology.build_topology([], gateway="10.0.0.1")
+                topology.save_topology(topo, name="demo")
+                self.app.maps = topology.list_maps()
+                self.app.screen = "maps"
+                self.app.maps_keys(mapzero.KEY_D)
+                self.app.maps_keys(mapzero.KEY_ESC)
+                self.assertFalse(self.app.confirm_delete)
+                self.assertEqual(self.app.screen, "maps")
+                self.assertEqual(len(topology.list_maps()), 1)
+            finally:
+                topology.SAVE_DIR = original
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,9 +4,16 @@
 Scans the local network with nmap, draws the resulting topology on the
 320x170 framebuffer and saves it as JSON.
 
+The screen is a small instrument face, so the UI is drawn as a chart sheet:
+a deep prussian ground, hairline rules, amber for whatever is under the
+cursor and mint for anything that answered. Labels are sans, addresses and
+port numbers are mono so the columns line up.
+
 Keys:
-  Up/Down (or F/X)  - move in menus
-  Enter             - select
+  Up/Down (F/X)     - move the selection
+  Right/Left (C/Z)  - step sideways between the list and the map
+  Enter             - open / confirm
+  R                 - rescan the network
   S                 - save the current map
   D                 - delete the selected saved map
   Esc               - back / quit
@@ -35,10 +42,19 @@ FB_DEV = "/dev/fb0"
 W, H = 320, 170
 BPP = 2
 FBIOGET_VSCREENINFO = 0x4600
+FBIOGET_FSCREENINFO = 0x4602
 
 FONT_PATHS = (
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/TTF/DejaVuSans.ttf",
+)
+FONT_BOLD_PATHS = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+)
+FONT_MONO_PATHS = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
 )
 CONFIG_PATH = os.path.expanduser("~/.config/mapzero/config.json")
 
@@ -60,12 +76,38 @@ KEY_S = 31
 KEY_D = 32
 KEY_R = 19
 
-BG = (16, 18, 22)
-FG = (222, 226, 232)
-DIM = (130, 136, 146)
-ACCENT = (230, 106, 44)
-OK = (58, 125, 68)
-WARN = (185, 74, 44)
+# The Cardputer Zero has no cursor keys: F, Z, X and C sit where a d-pad
+# would, and the vendor asks apps to read them as arrows.
+UP_KEYS = (KEY_UP, KEY_F)
+DOWN_KEYS = (KEY_DOWN, KEY_X)
+LEFT_KEYS = (KEY_LEFT, KEY_Z)
+RIGHT_KEYS = (KEY_RIGHT, KEY_C)
+
+# Palette: cyanotype ink on prussian paper.
+BG = (13, 31, 45)          # ground
+PANEL = (18, 41, 59)       # header, footer and info bands
+PANEL_HI = (31, 68, 94)    # the row under the cursor
+RULE = (43, 84, 110)       # hairlines and rings
+INK = (226, 240, 247)      # primary text
+INK_DIM = (139, 176, 196)  # secondary text
+INK_FAINT = (92, 130, 152)  # grid, hints
+AMBER = (243, 180, 66)     # selection, focus, the gateway
+MINT = (99, 213, 172)      # something that answered
+CORAL = (241, 111, 97)     # failures
+
+# Layout, in pixels.
+HDR_H = 17                 # header band, hairline under it
+RULE_Y = 17
+BODY_TOP = 19
+COL_Y = 20                 # column captions
+COL_RULE = 33
+BODY_BOT = 135
+INFO_RULE = 136            # info band under the body
+INFO_TOP = 137
+INFO_BOT = 151
+FTR_RULE = 153             # key legend at the very bottom
+FTR_TOP = 154
+FTR_BOT = 169
 
 MENU = ("Scan network", "Saved maps", "Quit")
 
@@ -101,8 +143,15 @@ def image_to_rgb565(img):
     return bytes(out)
 
 
-def load_font(size):
-    for path in FONT_PATHS:
+def load_font(size, bold=False, mono=False):
+    """Load DejaVu at the given size, falling back to the bitmap font."""
+    if mono:
+        paths = FONT_MONO_PATHS
+    elif bold:
+        paths = FONT_BOLD_PATHS
+    else:
+        paths = FONT_PATHS
+    for path in paths + FONT_PATHS:
         if os.path.exists(path):
             try:
                 return ImageFont.truetype(path, size)
@@ -151,10 +200,7 @@ def open_input_devices():
     candidates.extend(sorted(glob.glob("/dev/input/event*")))
     seen = set()
     for path in candidates:
-        try:
-            real = os.path.realpath(path)
-        except OSError:
-            real = path
+        real = os.path.realpath(path)
         if real in seen:
             continue
         seen.add(real)
@@ -201,6 +247,9 @@ class Scanner:
         self.error = ""
         self.done = False
         self.progress = ""
+        self.done_chunks = 0
+        self.total_chunks = 0
+        self.found = 0
         self.cancelled = False
         self._thread = None
 
@@ -212,6 +261,9 @@ class Scanner:
         self.done = False
         self.cancelled = False
         self.progress = "scanning %s" % cidr
+        self.done_chunks = 0
+        self.total_chunks = 0
+        self.found = 0
         self._thread = threading.Thread(
             target=self._run, args=(cidr, thorough), daemon=True
         )
@@ -236,8 +288,11 @@ class Scanner:
     def is_cancelled(self):
         return self.cancelled
 
-    def _set_progress(self, text):
+    def _set_progress(self, text, done=0, total=0, found=0):
         self.progress = text
+        self.done_chunks = done
+        self.total_chunks = total
+        self.found = found
 
     def _run(self, cidr, thorough):
         try:
@@ -256,40 +311,126 @@ class Scanner:
         self.done = True
 
 
+def read_framebuffer(fd):
+    """Return the panel geometry and pixel layout of a framebuffer.
+
+    Returns a dict with xres, yres, bpp, the red/green/blue bit offsets and
+    the stride of one line, or None when the kernel does not answer.
+    """
+    import fcntl
+    try:
+        var = bytearray(160)
+        fcntl.ioctl(fd, FBIOGET_VSCREENINFO, var, True)
+        xres, yres = struct.unpack_from("=II", var, 0)
+        bpp = struct.unpack_from("=I", var, 24)[0]
+        red = struct.unpack_from("=I", var, 32)[0]
+        green = struct.unpack_from("=I", var, 44)[0]
+        blue = struct.unpack_from("=I", var, 56)[0]
+    except (OSError, struct.error):
+        return None
+    # fb_fix_screeninfo: id[16], smem_start (a pointer), smem_len, type,
+    # type_aux, visual, three 16 bit panning fields, then line_length. The
+    # pointer makes the offset depend on the word size.
+    stride_off = 38 + struct.calcsize("P")
+    stride_off = (stride_off + 3) & ~3
+    stride = 0
+    try:
+        fix = bytearray(160)
+        fcntl.ioctl(fd, FBIOGET_FSCREENINFO, fix, True)
+        stride = struct.unpack_from("=I", fix, stride_off)[0]
+    except (OSError, struct.error):
+        stride = 0
+    return {
+        "xres": xres, "yres": yres, "bpp": bpp,
+        "red": red, "green": green, "blue": blue,
+        "stride": stride,
+    }
+
+
+def pixel_format(info):
+    """Name the pixel layout of a framebuffer, or None if it is exotic.
+
+    The bit offsets say where each channel sits inside the pixel value, so
+    the same 32 bit panel can be BGRX or RGBX depending on the driver.
+
+    A 16 bit panel is assumed to be RGB565 unless the driver says the
+    channels are swapped: several simple fbdev drivers report the depth and
+    leave the bitfields empty, and refusing to start over a missing detail
+    would keep the app off the screen entirely.
+    """
+    if info is None:
+        return "rgb565"
+    bpp = info["bpp"]
+    red, green, blue = info["red"], info["green"], info["blue"]
+    if bpp == 16:
+        if (red, green, blue) == (0, 5, 11):
+            return "bgr565"
+        return "rgb565"
+    if bpp == 32:
+        if (red, green, blue) == (16, 8, 0):
+            return "bgrx"
+        if (red, green, blue) == (0, 8, 16):
+            return "rgbx"
+        return None
+    if not bpp:
+        return "rgb565"  # the kernel did not say: trust the device
+    return None
+
+
+def pack_pixels(img, fmt):
+    """Pack an RGB image into the bytes the panel expects."""
+    if fmt == "rgb565":
+        return image_to_rgb565(img)
+    if fmt == "bgr565":
+        r, g, b = img.split()
+        return image_to_rgb565(Image.merge("RGB", (b, g, r)))
+    if fmt == "bgrx":
+        # red at bits 16-23, green 8-15, blue 0-7: the bytes read B, G, R, X.
+        raw = bytearray(img.tobytes("raw", "BGRX"))
+        raw[3::4] = b"\xff" * (img.width * img.height)
+        return bytes(raw)
+    if fmt == "rgbx":
+        return img.tobytes("raw", "RGBX")
+    raise ValueError("unsupported pixel format %r" % fmt)
+
+
 def check_framebuffer(fd):
     """Refuse to draw on a framebuffer that is not the device's 320x170 panel.
 
     Writing 320x170 of pixels into an arbitrary framebuffer corrupts whatever
-    else is using it, so fail loudly instead. The pixel depth matters too:
-    RGB565 data on a 32bpp panel would come out as garbage colours.
+    else is using it, so fail loudly instead. The pixel layout matters too:
+    RGB565 data on a 32bpp panel comes out as garbage colours, so the layout
+    is detected and the pixels are packed to match it.
     """
-    try:
-        import fcntl
-        import struct as _struct
-        buf = bytearray(160)
-        fcntl.ioctl(fd, FBIOGET_VSCREENINFO, buf, True)
-        xres, yres = _struct.unpack("=II", bytes(buf[:8]))
-        bpp = _struct.unpack("=I", bytes(buf[24:28]))[0]
-    except OSError:
-        return  # cannot query: trust the device
-    if (xres, yres) != (W, H):
-        raise OSError(
-            "%s is %dx%d, expected %dx%d" % (FB_DEV, xres, yres, W, H)
-        )
-    if bpp and bpp != BPP * 8:
-        raise OSError(
-            "%s is %d bpp, expected %d" % (FB_DEV, bpp, BPP * 8)
-        )
+    info = read_framebuffer(fd)
+    if info is None:
+        return {"fmt": "rgb565", "stride": 0}  # cannot query: trust the device
+    if (info["xres"], info["yres"]) != (W, H):
+        raise OSError("%s is %dx%d, expected %dx%d"
+                      % (FB_DEV, info["xres"], info["yres"], W, H))
+    fmt = pixel_format(info)
+    if fmt is None:
+        raise OSError("%s uses %d bpp at r=%d g=%d b=%d, which is not a "
+                      "supported layout" % (FB_DEV, info["bpp"], info["red"],
+                                            info["green"], info["blue"]))
+    info["fmt"] = fmt
+    return info
 
 
 class App:
     def __init__(self, fb_path=FB_DEV):
-        self.font = load_font(13)
-        self.font_sm = load_font(11)
-        self.font_title = load_font(15)
+        self.font_h = load_font(13, bold=True)
+        self.font = load_font(12)
+        self.font_s = load_font(11)
+        self.font_xs = load_font(10)
+        self.font_m = load_font(12, mono=True)
+        self.font_ms = load_font(10, mono=True)
+        self.font_logo = load_font(22, bold=True)
         self.screen = "menu"
         self.menu_index = 0
         self.scroll = 0
+        self.sel = 0
+        self.map_sel = 0
         self.maps = []
         self.map_index = 0
         self.topo = None
@@ -297,193 +438,448 @@ class App:
         self.subnet = ""
         self.status = ""
         self.error = ""
+        self.updated = ""
+        self.confirm_delete = False
         self.silent_scan = False
         self.refresh_interval = _int_or_zero(read_config().get("refresh", 0))
         self.last_refresh = time.time()
         self.scanner = Scanner()
         self.fd = None
         self.mm = None
+        self.fmt = "rgb565"
+        self.stride = 0
         self._last_raw = None
+        self._net_cache = None
+        self._maps_cache = (0, [])
         if fb_path is not None:
             self.fd = os.open(fb_path, os.O_RDWR)
-            check_framebuffer(self.fd)
+            info = check_framebuffer(self.fd)
+            self.fmt = info["fmt"]
+            self.stride = info["stride"]
+            row = W * self.fmt_bytes()
+            if not self.stride or self.stride < row:
+                self.stride = row
             try:
-                self.mm = mmap.mmap(self.fd, W * H * BPP, mmap.MAP_SHARED,
+                self.mm = mmap.mmap(self.fd, self.stride * H, mmap.MAP_SHARED,
                                     mmap.PROT_WRITE | mmap.PROT_READ)
             except (OSError, ValueError) as exc:
                 raise OSError("cannot map %dx%d framebuffer: %s"
                               % (W, H, exc))
         self.input_fds = open_input_devices()
 
+    def fmt_bytes(self):
+        return 4 if self.fmt in ("bgrx", "rgbx") else 2
+
     # ---------------- rendering ----------------
 
     def blit(self, img):
         if self.mm is None:
             return
-        raw = img.tobytes()
+        raw = pack_pixels(img, self.fmt)
         if raw == self._last_raw:
-            return  # nothing changed: skip the expensive conversion
+            return  # nothing changed: skip the conversion
         self._last_raw = raw
-        self.mm.seek(0)
-        self.mm.write(image_to_rgb565(img))
+        row = W * self.fmt_bytes()
+        if self.stride == row:
+            self.mm.seek(0)
+            self.mm.write(raw)
+            return
+        # The panel pads its lines: write one row at a time.
+        for y in range(H):
+            self.mm.seek(y * self.stride)
+            self.mm.write(raw[y * row:(y + 1) * row])
 
     def new_image(self):
         return Image.new("RGB", (W, H), BG)
 
-    def header(self, draw, title, right=""):
-        draw.rectangle([0, 0, W - 1, 17], fill=(28, 32, 38))
-        draw.text((5, 2), title, font=self.font_title, fill=ACCENT)
-        if right:
-            draw.text((W - 5 - draw.textlength(right, font=self.font_sm), 4),
-                      right, font=self.font_sm, fill=DIM)
+    # ---- drawing helpers ----
 
-    def footer(self, draw, text):
-        draw.line([(0, H - 14), (W - 1, H - 14)], fill=(40, 44, 50))
-        draw.text((5, H - 13), text, font=self.font_sm, fill=DIM)
+    def rule(self, draw, y, color=RULE):
+        draw.line([(0, y), (W - 1, y)], fill=color)
+
+    def text_right(self, draw, text, y, font, fill):
+        w = draw.textlength(text, font=font)
+        draw.text((W - 8 - w, y), text, font=font, fill=fill)
+
+    def header(self, draw, title, right=""):
+        draw.rectangle([0, 0, W - 1, HDR_H - 1], fill=PANEL)
+        draw.text((8, 2), title, font=self.font_h, fill=INK)
+        if right:
+            self.text_right(draw, right, 4, self.font_ms, INK_DIM)
+        self.rule(draw, RULE_Y)
+
+    def info_strip(self, draw, left="", right="", color=None):
+        """The band under the body: context about the current selection."""
+        draw.rectangle([0, INFO_TOP, W - 1, INFO_BOT], fill=PANEL)
+        self.rule(draw, INFO_RULE)
+        if left:
+            draw.text((8, INFO_TOP + 3), left, font=self.font_ms,
+                      fill=color or INK_DIM)
+        if right:
+            self.text_right(draw, right, INFO_TOP + 3, self.font_ms,
+                            color or INK_DIM)
+
+    def status_line(self):
+        """The transient message to show, if any. Errors outrank notices."""
+        if self.error:
+            return self.error, CORAL
+        if self.status:
+            return self.status, MINT
+        return "", None
+
+    def notice(self, draw):
+        """A transient message takes over the info band while it lasts."""
+        text, color = self.status_line()
+        if not text:
+            return
+        self.info_strip(draw, text, "", color)
+
+    def footer(self, draw, items):
+        """The key legend: amber key names, dim action words."""
+        draw.rectangle([0, FTR_TOP, W - 1, FTR_BOT], fill=PANEL)
+        self.rule(draw, FTR_RULE)
+        x = 8
+        y = FTR_TOP + 3
+        for key, action in items:
+            kw = draw.textlength(key, font=self.font_s)
+            aw = draw.textlength(action, font=self.font_s) if action else 0
+            if x + kw + aw > W - 8:
+                break  # never let the legend run off the panel
+            draw.text((x, y), key, font=self.font_s, fill=AMBER)
+            x += kw + 3
+            if action:
+                draw.text((x, y), action, font=self.font_s, fill=INK_DIM)
+                x += aw
+            x += 8
+
+    def fit(self, draw, text, font, maxw):
+        """Shorten text with an ellipsis until it fits maxw."""
+        if draw.textlength(text, font=font) <= maxw:
+            return text
+        while text and draw.textlength(text + "…", font=font) > maxw:
+            text = text[:-1]
+        return text + "…"
+
+    # ---- screen data ----
+
+    def local_network(self):
+        """Cached (subnet, gateway) of this device."""
+        if self._net_cache is None:
+            try:
+                self._net_cache = (netscan.local_cidr(), netscan.gateway_ip())
+            except OSError:
+                self._net_cache = ("", "")
+        return self._net_cache
+
+    def saved_maps(self):
+        """Cached list of saved maps, refreshed at most every few seconds."""
+        now = time.time()
+        stamp, maps = self._maps_cache
+        if now - stamp > 5:
+            maps = topology.list_maps()
+            self._maps_cache = (now, maps)
+        return maps
+
+    def hosts(self):
+        if not self.topo:
+            return []
+        return self.topo["nodes"]
+
+    def gateway_ip(self):
+        return (self.topo or {}).get("gateway") or ""
+
+    def service_ports(self, node, limit=4):
+        """Port numbers of a node, as a short comma separated list."""
+        services = node.get("services", [])
+        ports = [str(s["port"]) for s in services[:limit]]
+        extra = len(services) - len(ports)
+        return ", ".join(ports) + (" +%d" % extra if extra > 0 else "")
+
+    def service_names(self, node, limit=3):
+        """Service names of a node, without the version noise."""
+        names = []
+        for svc in node.get("services", [])[:limit]:
+            names.append((svc.get("name") or "?").split(" (")[0])
+        return ", ".join(names)
+
+    # ---- screens ----
 
     def draw_menu(self):
         img = self.new_image()
         d = ImageDraw.Draw(img)
-        self.header(d, "MapZero", "v1.0")
-        y = 30
+        subnet, gateway = self.local_network()
+        maps = self.saved_maps()
+
+        d.text((10, 4), "MapZero", font=self.font_logo, fill=AMBER)
+        d.text((12, 30), "network topology mapper", font=self.font_s,
+               fill=INK_DIM)
+        d.line([(12, 47), (12 + d.textlength("network topology mapper",
+                                             font=self.font_s), 47)],
+               fill=RULE)
+
+        y = 56
         for i, item in enumerate(MENU):
-            color = ACCENT if i == self.menu_index else FG
             if i == self.menu_index:
-                d.rectangle([2, y - 2, W - 3, y + 13], outline=ACCENT)
-            d.text((10, y), item, font=self.font, fill=color)
-            y += 20
-        if self.error:
-            d.text((8, H - 44), self.error[:52], font=self.font_sm, fill=WARN)
-        self.footer(d, "Up/Down select   Enter open   Esc quit")
+                d.rectangle([6, y - 3, 9, y + 13], fill=AMBER)
+                d.text((18, y), item, font=self.font, fill=INK)
+            else:
+                d.text((18, y), item, font=self.font, fill=INK_DIM)
+            if item == "Scan network" and subnet:
+                self.text_right(d, subnet, y + 1, self.font_ms, INK_FAINT)
+            elif item == "Saved maps" and maps:
+                self.text_right(d, "%d saved" % len(maps), y + 1,
+                                self.font_ms, INK_FAINT)
+            y += 22
+
+        if subnet:
+            d.text((18, 120), "target", font=self.font_xs, fill=INK_FAINT)
+            d.text((70, 119), subnet, font=self.font_ms, fill=INK_DIM)
+        if gateway:
+            d.text((18, 132), "gateway", font=self.font_xs, fill=INK_FAINT)
+            d.text((70, 131), gateway, font=self.font_ms, fill=INK_DIM)
+
+        self.notice(d)
+        self.footer(d, [("up/dn", "move"), ("enter", "open"), ("esc", "quit")])
+        self.text_right(d, "v1.0", FTR_TOP + 3, self.font_ms, INK_FAINT)
         return img
 
     def draw_scanning(self):
         img = self.new_image()
         d = ImageDraw.Draw(img)
         self.header(d, "Scanning", self.subnet)
-        d.text((10, 40), self.scanner.progress or "starting nmap...", font=self.font,
-               fill=FG)
-        d.text((10, 62), "nmap is running. Esc cancels the scan.",
-               font=self.font_sm, fill=DIM)
-        self.footer(d, "Esc cancel scan")
+        sc = self.scanner
+
+        d.text((14, 32), "nmap -sT", font=self.font_m, fill=MINT)
+        d.text((14, 52), "sweeping the subnet", font=self.font, fill=INK)
+
+        bx, by, bw, bh = 14, 78, W - 28, 8
+        d.rectangle([bx, by, bx + bw, by + bh], fill=RULE)
+        if sc.total_chunks:
+            filled = int(bw * sc.done_chunks / sc.total_chunks)
+            d.rectangle([bx, by, bx + max(1, filled) - 1, by + bh], fill=AMBER)
+        d.text((14, 94), "chunk %d of %d" % (sc.done_chunks, sc.total_chunks),
+               font=self.font_s, fill=INK_DIM)
+        self.text_right(d, "%d found" % sc.found, 94, self.font_s, MINT)
+
+        d.text((14, 114), self.fit(d, sc.progress or "starting nmap...",
+                                   self.font_xs, W - 28),
+               font=self.font_xs, fill=INK_FAINT)
+        self.footer(d, [("esc", "cancel scan")])
         return img
 
     def draw_hosts(self):
         img = self.new_image()
         d = ImageDraw.Draw(img)
-        self.header(d, "Hosts", "%d found" % len(self.topo["nodes"]))
-        nodes = self.topo["nodes"]
-        rows = 8
+        nodes = self.hosts()
+        gw = self.gateway_ip()
+        self.header(d, "Hosts", "%d found" % len(nodes))
+
+        rows = 7
+        if self.sel >= len(nodes):
+            self.sel = max(0, len(nodes) - 1)
+        if self.sel < self.scroll:
+            self.scroll = self.sel
+        if self.sel >= self.scroll + rows:
+            self.scroll = self.sel - rows + 1
         visible = nodes[self.scroll:self.scroll + rows]
 
-        def mac_of(node):
-            mac = (node.get("mac") or "").strip()
-            if set(mac) <= {"0", ":"}:  # nmap's "unknown" MAC
-                return ""
-            return mac[:17]
+        # Column widths come from the font, not from a guess.
+        ip_w = max([d.textlength(n["ip"], font=self.font_m) for n in visible]
+                   or [70])
+        ip_w = min(ip_w, 92)
+        x_ip = 14
+        x_host = x_ip + ip_w + 10
+        x_port = W - 8
 
-        def fit_services(node):
-            """Shorten the port list until it fits the remaining width."""
-            ports = [str(s["port"]) for s in node["services"][:8]]
-            while ports:
-                text = ",".join(ports)
-                if x_svc + d.textlength(text, font=self.font_sm) <= W - 4:
-                    return text
-                ports.pop()
-            return ""
+        d.text((x_ip, COL_Y), "Address", font=self.font_xs, fill=INK_DIM)
+        d.text((x_host, COL_Y), "Host", font=self.font_xs, fill=INK_DIM)
+        self.text_right(d, "Ports", COL_Y, self.font_xs, INK_DIM)
+        self.rule(d, COL_RULE)
 
-        # Measure the columns instead of guessing x positions: the font is
-        # wider than the bitmap fallback on the device.
-        ip_w = max([d.textlength(n["ip"], font=self.font_sm) for n in visible]
-                   or [0])
-        mac_w = max([d.textlength(mac_of(n), font=self.font_sm) for n in visible]
-                    or [0])
-        x_ip = 6
-        x_mac = int(x_ip + ip_w + 6)
-        x_svc = int(x_mac + mac_w + 8)
+        y = COL_RULE + 5
+        for offset, node in enumerate(visible):
+            selected = (self.scroll + offset) == self.sel
+            if selected:
+                d.rectangle([0, y - 2, W - 1, y + 12], fill=PANEL_HI)
+                d.rectangle([0, y - 2, 3, y + 12], fill=AMBER)
+            d.text((x_ip, y), node["ip"], font=self.font_m,
+                   fill=AMBER if selected else INK)
+            name = node.get("hostname") or ""
+            if not name and node["ip"] == gw:
+                name = "gateway"
+            if name:
+                room = x_port - 46 - x_host
+                d.text((x_host, y + 1), self.fit(d, name, self.font, room),
+                       font=self.font_s, fill=INK_DIM)
+            ports = self.service_ports(node)
+            if ports:
+                pw = d.textlength(ports, font=self.font_ms)
+                d.text((x_port - pw, y + 1), ports, font=self.font_ms, fill=MINT)
+            y += 14
 
-        y = 22
-        for node in visible:
-            d.text((x_ip, y), node["ip"], font=self.font_sm, fill=FG)
-            mac = mac_of(node)
-            if mac:
-                d.text((x_mac, y), mac, font=self.font_sm, fill=DIM)
-            svc = fit_services(node)
-            if svc:
-                d.text((x_svc, y), svc, font=self.font_sm, fill=OK)
-            y += 15
         if not nodes:
-            d.text((10, 60), "no hosts found", font=self.font, fill=DIM)
-        if self.status:
-            d.text((6, H - 26), self.status[:40], font=self.font_sm, fill=DIM)
-        self.footer(d, "Enter map   R rescan   S save   Esc back")
+            d.text((14, 70), "no hosts answered", font=self.font, fill=INK_DIM)
+            d.text((14, 88), "check the interface and scan again",
+                   font=self.font_s, fill=INK_FAINT)
+
+        node = nodes[self.sel] if nodes else None
+        left = ""
+        if node:
+            left = self.fit(d, "%s  %s" % (node["ip"],
+                                            node.get("mac") or "no mac"),
+                            self.font_ms, 210)
+        self.info_strip(d, left, self.updated)
+        self.notice(d)
+        self.footer(d, [("up/dn", "move"), ("enter", "map"), ("R", "rescan"),
+                         ("S", "save"), ("esc", "back")])
         return img
 
     def draw_map(self):
         img = self.new_image()
         d = ImageDraw.Draw(img)
-        nodes = self.topo["nodes"]
+        nodes = self.hosts()
+        gw = self.gateway_ip()
         self.header(d, "Topology", "%d hosts" % len(nodes))
-        cx, cy = W // 2, (H + 16) // 2
-        radius = 52
 
-        gw = self.topo.get("gateway") or ""
-        gw_node = next((n for n in nodes if n["ip"] == gw), None)
-        gw_ip = gw_node["ip"] if gw_node else gw
+        cx, cy = W // 2, (BODY_TOP + BODY_BOT) // 2 + 2
+        outer = (114, 36)
+        inner = (58, 17)
 
-        # gateway in the middle
-        d.ellipse([cx - 16, cy - 16, cx + 16, cy + 16], outline=ACCENT, width=2)
-        gw_label = "GW"
-        gw_w = d.textlength(gw_label, font=self.font_sm)
-        d.text((cx - gw_w / 2, cy - gw_w / 2 - 1), gw_label,
-               font=self.font_sm, fill=ACCENT)
+        # The gateway sits in the middle, the other hosts on a ring around it.
+        # The selection index is the same in both the list and the map, so
+        # the cursor never jumps to a different machine.
+        others = [n for n in nodes if n["ip"] != gw]
+        cap = 10
+        if len(others) > cap:
+            rings = ((others[:cap], outer), (others[cap:cap + 8], inner))
+        else:
+            rings = ((others, outer),)
 
-        others = [n for n in nodes if n["ip"] != gw_ip]
-        count = len(others)
-        # Two rings once a single ring would overlap labels.
-        rings = [(radius, others)] if count <= 8 else [
-            (radius, others[: count // 2]),
-            (radius - 22, others[count // 2:]),
-        ]
-        for r, ring in rings:
-            for i, node in enumerate(ring):
-                angle = 2 * math.pi * i / len(ring) - math.pi / 2
-                x = cx + int(r * math.cos(angle))
-                y = cy + int(r * math.sin(angle))
-                d.line([(cx, cy), (x, y)], fill=(58, 64, 74))
-                d.ellipse([x - 3, y - 3, x + 3, y + 3], fill=OK)
-                label = host_label(node)
-                tw = d.textlength(label, font=self.font_sm)
-                lx = x + 5
-                if lx + tw > W - 4:
-                    lx = x - 5 - tw
-                ly = y - 5
-                if ly < 20:
-                    ly = y + 4
-                if ly > H - 26:
-                    ly = y - 14
-                d.text((lx, ly), label, font=self.font_sm, fill=FG)
+        # Where every node sits, in list order.
+        spots = []
+        for node in nodes:
+            if node["ip"] == gw:
+                spots.append((node, cx, cy, 0.0))
+                continue
+            for ring, (rx, ry) in rings:
+                if node in ring:
+                    i = ring.index(node)
+                    ang = -math.pi / 2 + 2 * math.pi * i / len(ring)
+                    spots.append((node, cx + int(rx * math.cos(ang)),
+                                  cy + int(ry * math.sin(ang)), ang))
+                    break
 
-        if self.status:
-            d.text((6, H - 26), self.status[:40], font=self.font_sm, fill=DIM)
-        self.footer(d, "Esc back   R rescan   S save")
+        # The rings and the links are the paper the nodes sit on, so they go
+        # down first: the gateway disc is painted over them afterwards.
+        for _ring, (rx, ry) in rings:
+            d.ellipse([cx - rx, cy - ry, cx + rx, cy + ry], outline=RULE)
+        for node, x, y, _ang in spots:
+            if node["ip"] == gw:
+                continue
+            dx, dy = x - cx, y - cy
+            dist = math.hypot(dx, dy) or 1
+            d.line([(cx + dx / dist * 14, cy + dy / dist * 14), (x, y)],
+                   fill=RULE)
+
+        # The gateway anchors the chart: amber, in the middle.
+        d.ellipse([cx - 13, cy - 13, cx + 13, cy + 13], fill=AMBER)
+        gw_text = "GW"
+        gw_w = d.textlength(gw_text, font=self.font_s)
+        d.text((cx - gw_w / 2, cy - 7), gw_text, font=self.font_s, fill=BG)
+
+        self.map_sel = max(0, min(self.map_sel, len(nodes) - 1))
+        for index, (node, x, y, ang) in enumerate(spots):
+            selected = index == self.map_sel
+            if node["ip"] == gw:
+                if selected:
+                    d.rectangle([x - 17, y - 17, x + 17, y + 17], outline=AMBER)
+                continue
+            if selected:
+                d.rectangle([x - 7, y - 7, x + 7, y + 7], fill=BG)
+                d.rectangle([x - 6, y - 6, x + 6, y + 6], outline=AMBER)
+            live = bool(node.get("services"))
+            d.rectangle([x - 4, y - 4, x + 4, y + 4], fill=BG)
+            d.rectangle([x - 3, y - 3, x + 3, y + 3],
+                        fill=MINT if live else INK_FAINT)
+            label = host_label(node)
+            tw = d.textlength(label, font=self.font_xs)
+            sin_a, cos_a = math.sin(ang), math.cos(ang)
+            if sin_a < -0.5:
+                lx, ly = x - tw / 2, y - 19
+            elif sin_a > 0.5:
+                lx, ly = x - tw / 2, y + 9
+            elif cos_a >= 0:
+                lx, ly = x + 9, y - 6
+            else:
+                lx, ly = x - 9 - tw, y - 6
+            lx = max(3, min(W - 3 - tw, lx))
+            ly = max(BODY_TOP, min(BODY_BOT - 12, ly))
+            # A backing plate keeps the label legible over the rules.
+            d.rectangle([lx - 2, ly - 1, lx + tw + 2, ly + 11], fill=BG)
+            d.text((lx, ly), label, font=self.font_xs,
+                   fill=INK if selected else INK_DIM)
+
+        node = nodes[self.map_sel] if nodes else None
+        left = ""
+        if node:
+            left = self.fit(d, "%s  %s" % (node["ip"],
+                                            self.service_names(node) or "-"),
+                            self.font_ms, 210)
+        self.info_strip(d, left, self.updated)
+        self.notice(d)
+        self.footer(d, [("up/dn", "host"), ("enter", "back"), ("R", "rescan"),
+                         ("S", "save"), ("esc", "back")])
         return img
 
     def draw_maps(self):
         img = self.new_image()
         d = ImageDraw.Draw(img)
-        self.header(d, "Saved maps", "%d" % len(self.maps))
-        y = 24
-        for path in self.maps[self.scroll:self.scroll + 9]:
-            name = os.path.basename(path)
-            selected = self.maps.index(path) == self.map_index
-            d.text((8, y), ("> " if selected else "  ") + name[:36],
-                   font=self.font_sm, fill=ACCENT if selected else FG)
-            y += 15
-        if not self.maps:
-            d.text((10, 60), "no saved maps", font=self.font, fill=DIM)
-        self.footer(d, "Enter open   D delete   Esc back")
+        maps = self.maps
+        self.header(d, "Saved maps", "%d" % len(maps))
+
+        if not maps:
+            d.text((14, 70), "no saved maps", font=self.font, fill=INK_DIM)
+            d.text((14, 88), "press S on a scan to keep one",
+                   font=self.font_s, fill=INK_FAINT)
+        else:
+            self.map_index = max(0, min(self.map_index, len(maps) - 1))
+            y = BODY_TOP + 4
+            for i, path in enumerate(maps[self.scroll:self.scroll + 7]):
+                index = self.scroll + i
+                selected = index == self.map_index
+                if selected:
+                    d.rectangle([0, y - 2, W - 1, y + 12], fill=PANEL_HI)
+                    d.rectangle([0, y - 2, 3, y + 12], fill=AMBER)
+                net, stamp = self.map_label(path)
+                d.text((14, y), net, font=self.font_m,
+                       fill=AMBER if selected else INK)
+                if stamp:
+                    self.text_right(d, stamp, y + 1, self.font_ms,
+                                    INK_DIM if selected else INK_FAINT)
+                y += 14
+
+        if self.confirm_delete:
+            self.info_strip(d, "press D again to delete", "esc cancels", CORAL)
+        else:
+            where = os.path.dirname(self.maps[self.map_index]) if maps else ""
+            self.info_strip(d, self.fit(d, where, self.font_ms, 210), "")
+        if not self.confirm_delete:
+            self.notice(d)
+        self.footer(d, [("up/dn", "move"), ("enter", "open"), ("D", "delete"),
+                         ("esc", "back")])
         return img
+
+    def map_label(self, path):
+        """Split a saved file name into its network and its timestamp."""
+        name = os.path.basename(path)
+        if name.endswith(".json"):
+            name = name[:-5]
+        parts = name.rsplit("-", 2)
+        if len(parts) == 3:
+            net, day, clock = parts
+            return net.replace("_", "/"), "%s-%s %s:%s" % (
+                day[4:6], day[6:8], clock[:2], clock[2:4])
+        return name.replace("_", "/"), ""
 
     def render(self):
         if self.screen == "menu":
@@ -527,6 +923,9 @@ class App:
             self.scanner.hosts, gateway=self.gateway, subnet=self.subnet
         )
         self.scroll = 0
+        self.sel = 0
+        self.map_sel = 0
+        self.updated = "updated %s" % time.strftime("%H:%M")
         self.screen = "hosts"
 
     def apply_silent_scan(self):
@@ -538,7 +937,8 @@ class App:
         self.topo = topology.build_topology(
             self.scanner.hosts, gateway=self.gateway, subnet=self.subnet
         )
-        self.status = "updated %s" % time.strftime("%H:%M:%S")
+        self.updated = "updated %s" % time.strftime("%H:%M")
+        self.status = self.updated
 
     def maybe_auto_refresh(self):
         """Rescan on a timer when the user enabled a refresh interval."""
@@ -552,7 +952,7 @@ class App:
             return
         self.last_refresh = now
         self.start_scan(silent=True)
-        self.status = "auto-refreshing..."
+        self.status = "refreshing..."
 
     def rescan(self):
         """Re-run the scan in the background and refresh the view."""
@@ -574,6 +974,8 @@ class App:
             self.topo = topo
             self.subnet = topo.get("subnet", "")
             self.scroll = 0
+            self.sel = 0
+            self.map_sel = 0
             self.screen = "hosts"
 
     # ---------------- main loop ----------------
@@ -601,6 +1003,8 @@ class App:
             # One key event at a time: a batch of codes must not collapse
             # into a single action.
             for code in codes:
+                self.status = ""
+                self.error = ""
                 if self.screen == "menu":
                     self.menu_keys(code)
                 elif self.screen == "hosts":
@@ -611,9 +1015,9 @@ class App:
                     self.maps_keys(code)
 
     def menu_keys(self, code):
-        if code in (KEY_UP, KEY_Z):
+        if code in UP_KEYS:
             self.menu_index = (self.menu_index - 1) % len(MENU)
-        elif code in (KEY_DOWN, KEY_X):
+        elif code in DOWN_KEYS:
             self.menu_index = (self.menu_index + 1) % len(MENU)
         elif code == KEY_ENTER:
             choice = MENU[self.menu_index]
@@ -623,6 +1027,7 @@ class App:
                 self.maps = topology.list_maps()
                 self.map_index = 0
                 self.scroll = 0
+                self.confirm_delete = False
                 self.screen = "maps"
             else:
                 raise SystemExit(0)
@@ -630,12 +1035,13 @@ class App:
             raise SystemExit(0)
 
     def hosts_keys(self, code):
-        nodes = self.topo["nodes"]
-        if code in (KEY_DOWN, KEY_X):
-            self.scroll = min(self.scroll + 1, max(0, len(nodes) - 8))
-        elif code in (KEY_UP, KEY_Z):
-            self.scroll = max(0, self.scroll - 1)
-        elif code == KEY_ENTER:
+        nodes = self.hosts()
+        if code in DOWN_KEYS:
+            self.sel = min(self.sel + 1, max(0, len(nodes) - 1))
+        elif code in UP_KEYS:
+            self.sel = max(0, self.sel - 1)
+        elif code in (KEY_ENTER, KEY_RIGHT):
+            self.map_sel = self.sel
             self.screen = "map"
         elif code == KEY_S:
             self.save_current()
@@ -645,26 +1051,42 @@ class App:
             self.screen = "menu"
 
     def map_keys(self, code):
-        if code == KEY_S:
+        nodes = self.hosts()
+        if code in DOWN_KEYS:
+            self.map_sel = min(self.map_sel + 1, max(0, len(nodes) - 1))
+        elif code in UP_KEYS:
+            self.map_sel = max(0, self.map_sel - 1)
+        elif code == KEY_S:
             self.save_current()
         elif code == KEY_R:
             self.rescan()
-        elif code in (KEY_ESC, KEY_ENTER):
+        elif code in (KEY_ESC, KEY_ENTER, KEY_LEFT):
+            self.sel = self.map_sel
             self.screen = "hosts"
 
     def maps_keys(self, code):
-        if code in (KEY_DOWN, KEY_X):
+        if code in DOWN_KEYS:
             self.map_index = min(self.map_index + 1, max(0, len(self.maps) - 1))
-        elif code in (KEY_UP, KEY_Z):
+            self.confirm_delete = False
+        elif code in UP_KEYS:
             self.map_index = max(0, self.map_index - 1)
+            self.confirm_delete = False
         elif code == KEY_ENTER and self.maps:
             self.open_map(self.maps[self.map_index])
         elif code == KEY_D and self.maps:
-            topology.delete_topology(self.maps[self.map_index])
-            self.maps = topology.list_maps()
-            self.map_index = min(self.map_index, max(0, len(self.maps) - 1))
+            if self.confirm_delete:
+                topology.delete_topology(self.maps[self.map_index])
+                self.maps = topology.list_maps()
+                self.map_index = min(self.map_index, max(0, len(self.maps) - 1))
+                self.confirm_delete = False
+                self.status = "map deleted"
+            else:
+                self.confirm_delete = True
         elif code == KEY_ESC:
-            self.screen = "menu"
+            if self.confirm_delete:
+                self.confirm_delete = False
+            else:
+                self.screen = "menu"
 
 
 def main():

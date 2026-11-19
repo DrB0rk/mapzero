@@ -26,6 +26,16 @@
           "at": "2026-11-19T20:10:49Z",
           "by": "omp",
           "text": "Live renders from a real nmap sweep of the local /24\n\n![hosts](kanvas-files/ee1b1af4508c9e88.png)\n\n![map](kanvas-files/9320ee0417baad81.png)"
+        },
+        {
+          "at": "2026-11-19T21:23:21Z",
+          "by": "omp",
+          "text": "UI/UX redesign for the 320x170 panel: cyanotype chart-sheet visual system (prussian ground, amber selection, mint live hosts), header/body/info-band/key-legend layout on every screen, mono type for addresses and ports, column captions, MAC of the selected host in the info band, progress bar plus live host count while scanning, one shared selection index between the host list and the topology, F/Z/X/C read as arrows per the vendor key map, delete now asks twice. Framebuffer: the pixel layout is detected from the fb bitfields so a 32bpp panel works (bgrx/rgbx), 16bpp defaults to rgb565 instead of refusing to start, and the line stride is honoured. Verified: 46 unit tests green, live nmap sweep of a real /24 driven through the real run loop (scan -> hosts -> map -> save -> saved maps), both 16bpp and 32bpp packing written into a real framebuffer file, screenshots regenerated from live data."
+        },
+        {
+          "at": "2026-11-19T21:23:24Z",
+          "by": "omp",
+          "text": "Redesigned hosts list and topology view, rendered from a live scan of the local /24\n\n![hosts](kanvas-files/0c25dd8209c4fe90.png)\n\n![map](kanvas-files/2a20fac0d8798060.png)"
         }
       ]
     }

@@ -254,7 +254,8 @@ def scan_network(cidr: str, thorough: bool = False, timeout=180, progress=None,
 
     `hosts` is a list of Host. `error` is "" on success or a message the UI
     can show (missing nmap, timeout, ...). `progress` is an optional callable
-    invoked with a human-readable status string after every chunk.
+    invoked with (text, chunks_done, chunks_total, hosts_found) after every
+    chunk, so the UI can draw a progress bar and a live host count.
     `cancelled` is an optional callable; when it returns True the running
     nmap is terminated and the scan stops.
     """
@@ -275,7 +276,7 @@ def scan_network(cidr: str, thorough: bool = False, timeout=180, progress=None,
         if stopped():
             return hosts, "scan cancelled"
         if progress:
-            progress("scanning %s (%d/%d)" % (cidr, index + 1, len(chunks)))
+            progress("scanning %s" % cidr, index, len(chunks), len(hosts))
         cmd = [NMAP, "-sT", "-n", "--max-retries", "0",
                "--host-timeout", "30s"]
         if thorough:
@@ -301,6 +302,8 @@ def scan_network(cidr: str, thorough: bool = False, timeout=180, progress=None,
                     return hosts, "scan cancelled"
                 found += parse_nmap_xml(out)
         hosts += found
+        if progress:
+            progress("scanning %s" % cidr, index + 1, len(chunks), len(hosts))
 
     return hosts, ""
 

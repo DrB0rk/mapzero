@@ -13,22 +13,47 @@ saves every scan as JSON so it can be reopened later.
 - **Scan network** - discovers hosts on the local `/24` and the services they
   expose. The scan runs in a background thread so the UI stays responsive; `Esc`
   cancels it.
-- **Hosts** - one row per host: name, address and open ports.
-- **Topology** - the gateway in the middle, hosts around it. Networks with more
-  than eight hosts are drawn on two rings so the labels stay readable.
+- **Hosts** - one row per host: address, name and open ports. The row under the
+  cursor also shows the MAC address of that host.
+- **Topology** - the gateway in the middle, hosts around it on a ring. Networks
+  with more than ten hosts get a second, inner ring.
 - **Saved maps** - scans are stored as JSON in `~/.local/share/mapzero/maps` and
   can be reopened (and deleted) from the app.
+
+## The screen
+
+The panel is 320x170, so the interface is built like a chart sheet rather than a
+desktop app:
+
+- A **header** names the screen and counts what is on it.
+- The **body** holds the content. Lists have their own caption row, the current
+  row is marked with an amber bar and a lit background.
+- An **info band** under the body explains the current selection - the MAC of
+  the selected host, its services, the last scan time. Transient messages
+  ("saved ...", "scan cancelled") take over that band while they last.
+- A **key legend** along the bottom names every key that does something on the
+  current screen, so the controls are discoverable without a manual.
+
+Labels are set in DejaVu Sans, addresses and port numbers in DejaVu Sans Mono so
+the columns line up and digits do not jitter.
 
 ## Keys
 
 | Key | Action |
 | --- | --- |
-| `Up` / `Down` (or `Z` / `X`) | move |
-| `Enter` | select / open the topology view |
+| `Up` / `Down` (or `F` / `X`) | move the selection |
+| `Right` / `Left` (or `C` / `Z`) | step between the host list and the map |
+| `Enter` | open / confirm |
 | `R` | rescan the network in the background and refresh the view |
 | `S` | save the current map |
-| `D` | delete the selected saved map |
+| `D` | delete the selected saved map (press twice to confirm) |
 | `Esc` | back / quit (during a scan: stop the scan) |
+
+The Cardputer Zero has no cursor keys: `F`, `Z`, `X` and `C` sit where a d-pad
+would, and the vendor asks apps to read them as arrows, so both spellings work.
+
+The selection follows you between the host list and the topology view - the
+machine picked in the list is the one picked on the map.
 
 `Esc` during a scan really stops it - the running nmap process is terminated,
 not just hidden.
@@ -54,10 +79,10 @@ bash build-deb.sh
 sudo apt install ./build/mapzero_1.0.0_all.deb
 ```
 
-The `.deb` pulls in `python3`, `python3-pil` and `nmap`. `postinst` adds the
-desktop user to the `video` and `input` groups so the app can open `/dev/fb0`
-and read the matrix keyboard; restart the session (or `APPLaunch.service`) for
-the group change to take effect.
+The `.deb` pulls in `python3`, `python3-pil`, `nmap` and `fonts-dejavu-core`.
+`postinst` adds the desktop user to the `video` and `input` groups so the app
+can open `/dev/fb0` and read the matrix keyboard; restart the session (or
+`APPLaunch.service`) for the group change to take effect.
 
 ## Configuration
 
@@ -85,8 +110,8 @@ needed:
 nmap -sT -n --max-retries 0 --host-timeout 30s -p 22,23,53,80,443,445,554,8080,8443 -oX - <host> <host> ...
 ```
 
-The subnet is split into chunks of 64 hosts so the progress display advances
-and one slow host cannot stall the whole scan. Each host is passed as its own
+The subnet is split into chunks of 64 hosts so the progress bar advances and
+one slow host cannot stall the whole scan. Each host is passed as its own
 argument - nmap cannot parse a comma-separated list, and trying to made it scan
 every host on its own. nmap's XML output is parsed into hosts, ports,
 services and (from the kernel ARP cache) MAC addresses.
@@ -123,7 +148,8 @@ python3 -m unittest discover -s tests
 ## Status
 
 Verified on a development host: real nmap sweeps of a live /24, the framebuffer
-renderer, the packaged `.deb`, and the store manifest.
+renderer in 16 and 32 bit pixel layouts, the packaged `.deb`, and the store
+manifest.
 
 **Not verified on the Cardputer Zero itself.** The 320x170 panel, the 46-key
 evdev keycodes and the APPLaunch carousel have been implemented from the
