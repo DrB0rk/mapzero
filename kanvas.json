@@ -46,6 +46,16 @@
           "at": "2026-11-19T21:56:52Z",
           "by": "omp",
           "text": "Follow-up fixes after the device run. The README claimed the keyboard was 'read from /dev/input/event3' - that was an overstatement: the app opens every /dev/input/event* node, and the physical key-to-action mapping was never exercised on hardware (the on-device runs injected key codes). The README now says exactly that. debian/postinst restarted APPLaunch.service as a system unit, but the launcher is a user unit, so the restart did nothing; it now uses 'su - <user> -c systemctl --user try-restart'. The README install steps no longer tell the user to restart a unit that is not theirs. netscan now reports why a scan failed: nmap's exit code and stderr reach the UI, so a broken scan says 'unrecognized option' instead of showing an empty network - verified on the device with a stand-in nmap. Version bumped to 1.0.1 and reinstalled on the device; test scaffolding removed and the cached sudo credential invalidated."
+        },
+        {
+          "at": "2026-11-19T21:58:31Z",
+          "by": "omp",
+          "text": "On-device renders, captured straight out of /dev/fb0 on the Cardputer Zero (the launcher was stopped during the capture, so no carousel overlay). Real scan of 10.0.1.0/24, 8 hosts.\n\n![clean_hosts](kanvas-files/099c0a13e34f50bc.png)\n\n![clean_map](kanvas-files/ca5f9527234ee94a.png)\n\n![clean_menu](kanvas-files/2378f04ad7d86360.png)"
+        },
+        {
+          "at": "2026-11-19T21:58:43Z",
+          "by": "omp",
+          "text": "Attached three frames captured straight out of /dev/fb0 on the Cardputer Zero with the launcher stopped, so the images show the app owning the panel with no carousel overlay. They came from a real scan of 10.0.1.0/24 that found 8 hosts. The launcher was restarted afterwards and is active again."
         }
       ]
     }
