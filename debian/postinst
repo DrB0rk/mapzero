@@ -1,0 +1,18 @@
+#!/bin/sh
+set -e
+
+# The app draws to /dev/fb0 and reads the matrix keyboard, so the desktop
+# user needs the video and input groups. Group changes only apply to new
+# sessions, hence the restart hint below.
+USER_NAME=$(getent passwd 1000 | cut -d: -f1 || true)
+if [ -n "$USER_NAME" ]; then
+    for grp in video input; do
+        if getent group "$grp" >/dev/null 2>&1; then
+            if ! id -nG "$USER_NAME" | tr ' ' '\n' | grep -qx "$grp"; then
+                usermod -aG "$grp" "$USER_NAME" || true
+            fi
+        fi
+    done
+fi
+
+exit 0

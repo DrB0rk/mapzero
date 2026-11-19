@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=MapZero
+Comment=Network topology mapper: nmap scan, topology view, saved maps
+Exec=/usr/share/APPLaunch/bin/mapzero
+Icon=share/images/mapzero.png
+Terminal=false
+Categories=Network;Security;
+StartupNotify=false

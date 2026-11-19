@@ -1,0 +1,36 @@
+{
+  "package_name": "mapzero",
+  "version": "1.0.0",
+  "app_name": "MapZero",
+  "bin_name": "mapzero",
+  "description": "Network topology mapper: scans the local network with nmap, draws the topology and saves it",
+  "store": {
+    "summary": "Map your local network topology with nmap, view it and save it",
+    "description": "MapZero scans the network the Cardputer Zero is attached to, using nmap, and turns the result into a topology map.\n\n**Scan** - discovers hosts on the local subnet and the services they expose. The scan runs in the background, so the screen stays responsive; press Esc to cancel.\n\n**Topology** - the gateway sits in the middle, every discovered host is drawn around it with its name and open ports. On busy networks the hosts are laid out on two rings so the labels stay readable.\n\n**Saved maps** - every scan can be saved as JSON under ~/.local/share/mapzero/maps and reopened later without scanning again.\n\nOnly scan networks you own or are authorised to test.",
+    "categories": [
+      "Security",
+      "System Tools"
+    ],
+    "screenshots": [
+      "screenshots/hosts.png",
+      "screenshots/map.png"
+    ],
+    "icon": "packaging/icon.png",
+    "license": "MIT",
+    "source_repo": "https://github.com/yourname/mapzero",
+    "author": {
+      "github": "yourname",
+      "display_name": "Your Name"
+    },
+    "share_code": "MPZ0",
+    "permissions": {
+      "camera": false,
+      "microphone": false,
+      "imu": false,
+      "network": true,
+      "additional_hardware": false,
+      "background_service": false,
+      "external_display": false
+    }
+  }
+}
