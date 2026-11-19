@@ -36,6 +36,11 @@
           "at": "2026-11-19T21:23:24Z",
           "by": "omp",
           "text": "Redesigned hosts list and topology view, rendered from a live scan of the local /24\n\n![hosts](kanvas-files/0c25dd8209c4fe90.png)\n\n![map](kanvas-files/2a20fac0d8798060.png)"
+        },
+        {
+          "at": "2026-11-19T21:52:57Z",
+          "by": "omp",
+          "text": "Verified on the real Cardputer Zero (BorkPuter, Raspberry Pi CM0, aarch64, Debian 13). Installed the .deb with apt-get: package mapzero 1.0.0, desktop entry at /usr/share/APPLaunch/applications/mapzero.desktop, wrapper and icon in place, launcher picks it up. The device framebuffer is 320x170 at 16 bpp RGB565 with line_length 640 and no virtual offset, which the app detects and packs for. Verified on the panel itself: the menu, hosts list and topology views were captured straight out of /dev/fb0 and are distinct frames (md5 checked) - the scan found 8 hosts on 10.0.1.0/24 in 13.7s, and a saved map was written and reloaded. The 46-key matrix keyboard (tca8418c) is read as /dev/input/event3."
         }
       ]
     }

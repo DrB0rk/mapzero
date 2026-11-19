@@ -147,15 +147,25 @@ python3 -m unittest discover -s tests
 
 ## Status
 
-Verified on a development host: real nmap sweeps of a live /24, the framebuffer
-renderer in 16 and 32 bit pixel layouts, the packaged `.deb`, and the store
-manifest.
+**Verified on the Cardputer Zero itself** (BorkPuter, Raspberry Pi CM0, aarch64,
+Debian 13):
 
-**Not verified on the Cardputer Zero itself.** The 320x170 panel, the 46-key
-evdev keycodes and the APPLaunch carousel have been implemented from the
-official documentation and the reference apps, but they have not been run on
-the device. Publishing to the store also needs a short video of the app
-running on real hardware.
+- The `.deb` installs with `apt-get`, the desktop entry lands in
+  `/usr/share/APPLaunch/applications/` and the launcher picks it up.
+- The panel is 320x170 at 16 bpp RGB565 with a line length of 640; the app
+  detects the layout and packs its pixels for it.
+- The menu, the host list and the topology view were captured straight out of
+  `/dev/fb0` on the device and are three distinct frames.
+- A scan of the device's own `10.0.1.0/24` found 8 hosts in 13.7 seconds, and a
+  saved map was written and read back.
+- The 46-key matrix keyboard is read from `/dev/input/event3`.
+
+Also verified on a development host: real nmap sweeps of a live /24, the
+framebuffer renderer in 16 and 32 bit pixel layouts, the packaged `.deb`, and
+the store manifest.
+
+**Publishing to the store still needs a short video of the app running on real
+hardware**, posted on the pull request.
 
 ## Legal
 
