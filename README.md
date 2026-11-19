@@ -67,10 +67,12 @@ launcher.
 # on the Cardputer Zero
 sudo apt install nmap            # the scanner itself
 sudo bash install.sh             # builds and installs the .deb
-systemctl restart APPLaunch.service
 ```
 
-`MapZero` then appears in the launcher carousel with its icon.
+`MapZero` then appears in the launcher carousel with its icon. The launcher
+rescans `/usr/share/APPLaunch/applications` every few seconds, so there is
+nothing to restart; if the entry does not show up, `systemctl --user restart
+APPLaunch.service` forces it (it is a *user* unit, not a system one).
 
 To install by hand:
 
@@ -158,7 +160,11 @@ Debian 13):
   `/dev/fb0` on the device and are three distinct frames.
 - A scan of the device's own `10.0.1.0/24` found 8 hosts in 13.7 seconds, and a
   saved map was written and read back.
-- The 46-key matrix keyboard is read from `/dev/input/event3`.
+- The 46-key matrix keyboard is the `tca8418c` device (`/dev/input/event3`).
+  The app reads every `/dev/input/event*` node and picks up key codes from
+  it, but **the physical key-to-action mapping has not been exercised on
+  hardware** - the on-device runs drove the app with injected key codes,
+  not by pressing keys.
 
 Also verified on a development host: real nmap sweeps of a live /24, the
 framebuffer renderer in 16 and 32 bit pixel layouts, the packaged `.deb`, and

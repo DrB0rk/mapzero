@@ -117,7 +117,7 @@ class ScanCmdTest(unittest.TestCase):
 
         def fake_run(cmd, timeout=300, cancelled=None):
             seen["cmd"] = cmd
-            return "<nmaprun></nmaprun>", "", False
+            return "<nmaprun></nmaprun>", "", False, 0
 
         original = netscan._run_cancellable
         netscan._run_cancellable = fake_run
@@ -141,7 +141,7 @@ class ScanCmdTest(unittest.TestCase):
 
         def fake_run(cmd, timeout=300, cancelled=None):
             calls.append(cmd)
-            return "<nmaprun></nmaprun>", "", False
+            return "<nmaprun></nmaprun>", "", False, 0
 
         original = netscan._run_cancellable
         netscan._run_cancellable = fake_run
@@ -150,6 +150,38 @@ class ScanCmdTest(unittest.TestCase):
         finally:
             netscan._run_cancellable = original
         self.assertEqual(len(calls), 1)
+
+    def test_a_failing_nmap_is_reported(self):
+        """A broken scan must say so, not look like an empty network."""
+        import netscan
+
+        def fake_run(cmd, timeout=300, cancelled=None):
+            return "", "nmap: unrecognized option '--bogus'\n", False, 255
+
+        original = netscan._run_cancellable
+        netscan._run_cancellable = fake_run
+        try:
+            hosts, error = netscan.scan_network("10.0.0.0/30")
+        finally:
+            netscan._run_cancellable = original
+        self.assertEqual(hosts, [])
+        self.assertIn("unrecognized option", error)
+
+    def test_an_empty_but_successful_scan_is_not_an_error(self):
+        """No hosts on the wire is a result, not a failure."""
+        import netscan
+
+        def fake_run(cmd, timeout=300, cancelled=None):
+            return "<nmaprun></nmaprun>", "", False, 0
+
+        original = netscan._run_cancellable
+        netscan._run_cancellable = fake_run
+        try:
+            hosts, error = netscan.scan_network("10.0.0.0/30")
+        finally:
+            netscan._run_cancellable = original
+        self.assertEqual(hosts, [])
+        self.assertEqual(error, "")
 
 
 class FramebufferTest(unittest.TestCase):

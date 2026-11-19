@@ -22,9 +22,13 @@ if [ -n "$USER_NAME" ]; then
     done
 fi
 
-# Make the launcher pick up the new desktop entry.
-if command -v systemctl >/dev/null 2>&1; then
-    systemctl try-restart APPLaunch.service 2>/dev/null || true
+# Make the launcher pick up the new desktop entry. The launcher is a user
+# unit, so the system one would do nothing; the launcher also rescans
+# /usr/share/APPLaunch/applications every few seconds, so this is only a
+# nudge to show the new app sooner.
+if [ -n "$USER_NAME" ]; then
+    su - "$USER_NAME" -c \
+        'systemctl --user try-restart APPLaunch.service' >/dev/null 2>&1 || true
 fi
 
 exit 0

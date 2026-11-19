@@ -66,16 +66,16 @@ def _run(cmd, timeout=300):
 def _run_cancellable(cmd, timeout=300, cancelled=None):
     """Run a command, killing it when `cancelled()` becomes true.
 
-    Returns (stdout, stderr, was_cancelled). nmap is stopped with SIGTERM so
-    it does not keep burning CPU on a battery-powered device after the user
-    left the scan screen.
+    Returns (stdout, stderr, was_cancelled, returncode). nmap is stopped
+    with SIGTERM so it does not keep burning CPU on a battery-powered device
+    after the user left the scan screen.
     """
     try:
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
         )
-    except OSError:
-        return "", "", False
+    except OSError as exc:
+        return "", str(exc), False, 127
 
     was_cancelled = False
     deadline = time.time() + timeout if timeout else None
@@ -83,7 +83,7 @@ def _run_cancellable(cmd, timeout=300, cancelled=None):
         while True:
             try:
                 out, err = proc.communicate(timeout=0.5)
-                return out, err, was_cancelled
+                return out, err, was_cancelled, proc.returncode
             except subprocess.TimeoutExpired:
                 if cancelled is not None and cancelled():
                     was_cancelled = True
@@ -93,11 +93,11 @@ def _run_cancellable(cmd, timeout=300, cancelled=None):
                     except subprocess.TimeoutExpired:
                         proc.kill()
                         out, err = proc.communicate()
-                    return out, err, True
+                    return out, err, True, proc.returncode
                 if deadline and time.time() > deadline:
                     proc.kill()
                     out, err = proc.communicate()
-                    return out, err, False
+                    return out, err, False, proc.returncode
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -248,6 +248,15 @@ def _nmap_refused_targets(stderr: str) -> bool:
     return "Failed to resolve" in stderr or "Error resolving" in stderr
 
 
+def _nmap_error(stderr: str, code: int) -> str:
+    """Turn an nmap failure into a message the 320px screen can show."""
+    for line in (stderr or "").splitlines():
+        line = line.strip()
+        if line.startswith("nmap:"):
+            return line[5:].strip()[:60]
+    return "nmap failed (exit %d)" % code
+
+
 def scan_network(cidr: str, thorough: bool = False, timeout=180, progress=None,
                  cancelled=None):
     """Scan a CIDR and return (hosts, error).
@@ -283,9 +292,9 @@ def scan_network(cidr: str, thorough: bool = False, timeout=180, progress=None,
             cmd += ["--top-ports", "100"]
         else:
             cmd += ["-p", QUICK_PORTS]
-        cmd += ["-oX", "-"] + [str(h) for h in chunk]
-        out, err, was_cancelled = _run_cancellable(cmd, timeout=timeout,
-                                                   cancelled=stopped)
+        cmd += ["-oX", "-"] + [str(host) for host in chunk]
+        out, err, was_cancelled, code = _run_cancellable(cmd, timeout=timeout,
+                                                          cancelled=stopped)
         if was_cancelled:
             return hosts, "scan cancelled"
         found = parse_nmap_xml(out)
@@ -296,11 +305,15 @@ def scan_network(cidr: str, thorough: bool = False, timeout=180, progress=None,
                 if stopped():
                     return hosts, "scan cancelled"
                 single = cmd[:-len(chunk)] + [str(host)]
-                out, err, was_cancelled = _run_cancellable(single, timeout=60,
-                                                           cancelled=stopped)
+                out, err, was_cancelled, code = _run_cancellable(single,
+                                                                 timeout=60,
+                                                                 cancelled=stopped)
                 if was_cancelled:
                     return hosts, "scan cancelled"
                 found += parse_nmap_xml(out)
+        elif not found and code:
+            # nmap itself failed: say so instead of showing an empty network.
+            return hosts, _nmap_error(err, code)
         hosts += found
         if progress:
             progress("scanning %s" % cidr, index + 1, len(chunks), len(hosts))
