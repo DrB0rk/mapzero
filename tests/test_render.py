@@ -1,5 +1,6 @@
 """Rendering, layout and configuration robustness."""
 
+import ctypes
 import os
 import struct
 import sys
@@ -14,16 +15,15 @@ import netscan
 
 def fb_info(xres=320, yres=170, bpp=16, red=11, green=5, blue=0, stride=0):
     """A framebuffer ioctl answer, laid out like the kernel structures."""
-    var = bytearray(160)
-    struct.pack_into("=II", var, 0, xres, yres)
-    struct.pack_into("=I", var, 24, bpp)
-    struct.pack_into("=I", var, 32, red)
-    struct.pack_into("=I", var, 44, green)
-    struct.pack_into("=I", var, 56, blue)
-    fix = bytearray(160)
-    offset = 38 + struct.calcsize("P")
-    offset = (offset + 3) & ~3
-    struct.pack_into("=I", fix, offset, stride)
+    var = mapzero.FbVarScreeninfo()
+    var.xres = xres
+    var.yres = yres
+    var.bits_per_pixel = bpp
+    var.red.offset = red
+    var.green.offset = green
+    var.blue.offset = blue
+    fix = mapzero.FbFixScreeninfo()
+    fix.line_length = stride
     return var, fix
 
 
@@ -112,9 +112,11 @@ class FramebufferFormatTest(unittest.TestCase):
 
         def fake_ioctl(fd, request, buf, mutate):
             if request == mapzero.FBIOGET_VSCREENINFO:
-                buf[:len(var)] = var
+                ctypes.memmove(ctypes.addressof(buf), ctypes.addressof(var),
+                               ctypes.sizeof(var))
             else:
-                buf[:len(fix)] = fix
+                ctypes.memmove(ctypes.addressof(buf), ctypes.addressof(fix),
+                               ctypes.sizeof(fix))
             return 0
 
         with unittest.mock.patch("fcntl.ioctl", side_effect=fake_ioctl):
@@ -183,11 +185,57 @@ class LayoutTest(unittest.TestCase):
         img = self.app.render()
         self.assertEqual(img.size, (mapzero.W, mapzero.H))
 
+    def test_host_columns_stay_inside_the_panel(self):
+        """The name column must not run into the right aligned ports."""
+        from PIL import ImageDraw
+
+        self.app.topo["nodes"] = [
+            {"ip": "10.0.0.1", "mac": "", "hostname": "a" * 40,
+             "services": [{"port": p} for p in (22, 80, 443, 8080, 8443)]},
+            {"ip": "10.0.0.2", "mac": "", "hostname": "b" * 40,
+             "services": [{"port": p} for p in (22, 23, 53, 80, 443)]},
+        ]
+        draw = ImageDraw.Draw(self.app.new_image())
+        col = self.app.hosts_layout(draw, self.app.topo["nodes"])
+        # The name column ends before the ports begin.
+        self.assertLessEqual(col["host"] + max(0, col["name_room"]),
+                             col["port"] - col["port_w"])
+        self.assertLessEqual(col["port"], mapzero.W)
+
+    def test_long_hostname_and_ports_do_not_overlap(self):
+        """The worst case still leaves the columns apart."""
+        from PIL import ImageDraw
+
+        self.app.topo["nodes"] = [
+            {"ip": "10.0.0.1", "mac": "", "hostname": "x" * 30,
+             "services": [{"port": p} for p in (22, 80, 443, 8080, 8443)]},
+        ]
+        draw = ImageDraw.Draw(self.app.new_image())
+        col = self.app.hosts_layout(draw, self.app.topo["nodes"])
+        if col["name_room"] > 40:
+            self.assertLessEqual(col["host"] + col["name_room"],
+                                 col["port"] - col["port_w"])
+        else:
+            # Too tight for a name: the column is dropped instead.
+            self.assertLess(col["name_room"], 40)
+
     def test_every_screen_renders(self):
         for screen in ("menu", "scanning", "hosts", "map", "maps"):
             self.app.screen = screen
             img = self.app.render()
             self.assertEqual(img.size, (mapzero.W, mapzero.H))
+
+    def test_rows_stay_above_the_info_band(self):
+        """The last host row must not reach the info band."""
+        self.app.topo["nodes"] = [
+            {"ip": "10.0.0.%d" % i, "mac": "", "hostname": "h%d" % i,
+             "services": []} for i in range(20)
+        ]
+        self.app.screen = "hosts"
+        img = self.app.render()
+        rows = 7
+        last = mapzero.COL_RULE + 5 + (rows - 1) * 14
+        self.assertLessEqual(last + 12, mapzero.INFO_RULE)
 
     def test_long_hostnames_do_not_overflow(self):
         """A long name must be clipped, not drawn past the edge."""

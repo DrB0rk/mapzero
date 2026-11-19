@@ -57,9 +57,19 @@ class RunLoopTest(unittest.TestCase):
             self.app, "screen", "scanning"
         )
         self.run_frames([[mapzero.KEY_ENTER], [mapzero.KEY_ESC]])
-        self.assertEqual(self.app.screen, "menu")
         self.assertTrue(self.app.scanner.cancelled)
-        self.assertEqual(self.app.error, "scan cancelled")
+        # A scan the user called off is not an error, and the view they
+        # came from is still there.
+        self.assertEqual(self.app.screen, "menu")
+        self.assertEqual(self.app.error, "")
+        self.assertIn("stopped", self.app.status)
+
+    def test_cancelling_a_rescan_stays_on_the_hosts_screen(self):
+        self.app.scan_origin = "hosts"
+        self.app.screen = "scanning"
+        self.run_frames([[mapzero.KEY_ESC]])
+        self.assertEqual(self.app.screen, "hosts")
+        self.assertTrue(self.app.scanner.cancelled)
 
     def test_framebuffer_is_written(self):
         """The app must actually put pixels into the framebuffer."""

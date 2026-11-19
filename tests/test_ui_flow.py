@@ -140,6 +140,48 @@ class UiFlowTest(unittest.TestCase):
             finally:
                 topology.SAVE_DIR = original
 
+    def test_saved_maps_list_scrolls_to_the_selection(self):
+        """More than seven saved maps must still be reachable."""
+        import tempfile
+        original = topology.SAVE_DIR
+        with tempfile.TemporaryDirectory() as tmp:
+            topology.SAVE_DIR = tmp
+            try:
+                topo = topology.build_topology([], gateway="10.0.0.1")
+                for i in range(12):
+                    topology.save_topology(topo, name="net%02d" % i)
+                self.app.maps = topology.list_maps()
+                self.app.screen = "maps"
+                for _ in range(9):
+                    self.app.maps_keys(mapzero.KEY_DOWN)
+                self.app.render()
+                self.assertEqual(self.app.map_index, 9)
+                # The window followed the selection, so the highlighted row
+                # is on screen.
+                self.assertGreater(self.app.scroll, 0)
+                self.assertLessEqual(self.app.map_index,
+                                     self.app.scroll + 6)
+            finally:
+                topology.SAVE_DIR = original
+
+    def test_map_highlight_matches_the_selected_host(self):
+        """With many hosts the map must still point at the right machine."""
+        hosts = []
+        for i in range(30):
+            h = netscan.Host(ip="10.0.0.%d" % (i + 1), mac="",
+                             hostname="host%d" % i)
+            h.ports.append(netscan.Port(number=22, proto="tcp", state="open",
+                                         service="ssh"))
+            hosts.append(h)
+        self.app.topo = topology.build_topology(hosts, gateway="10.0.0.1",
+                                                 subnet="10.0.0.0/24")
+        self.app.screen = "hosts"
+        self.app.sel = 20
+        self.app.hosts_keys(mapzero.KEY_ENTER)
+        self.assertEqual(self.app.screen, "map")
+        self.app.render()
+        self.assertEqual(self.app.map_sel, 20)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -19,6 +19,7 @@ Keys:
   Esc               - back / quit
 """
 
+import ctypes
 import glob
 import json
 import math
@@ -311,38 +312,88 @@ class Scanner:
         self.done = True
 
 
+class FbBitfield(ctypes.Structure):
+    _fields_ = [
+        ("offset", ctypes.c_uint32),
+        ("length", ctypes.c_uint32),
+        ("msb_right", ctypes.c_uint32),
+    ]
+
+
+class FbVarScreeninfo(ctypes.Structure):
+    """The head of struct fb_var_screeninfo, as the kernel writes it.
+
+    Every field up to the bitfields is a fixed width integer, so this layout
+    is the same on 32 and 64 bit.
+    """
+
+    _fields_ = [
+        ("xres", ctypes.c_uint32),
+        ("yres", ctypes.c_uint32),
+        ("xres_virtual", ctypes.c_uint32),
+        ("yres_virtual", ctypes.c_uint32),
+        ("xoffset", ctypes.c_uint32),
+        ("yoffset", ctypes.c_uint32),
+        ("bits_per_pixel", ctypes.c_uint32),
+        ("grayscale", ctypes.c_uint32),
+        ("red", FbBitfield),
+        ("green", FbBitfield),
+        ("blue", FbBitfield),
+        ("transp", FbBitfield),
+    ]
+
+
+class FbFixScreeninfo(ctypes.Structure):
+    """The head of struct fb_fix_screeninfo.
+
+    c_ulong is the native size of a long, so smem_start and mmio_start land
+    where the kernel expects them on both 32 and 64 bit. Hand counted byte
+    offsets would read the wrong field on the device.
+    """
+
+    _fields_ = [
+        ("id", ctypes.c_char * 16),
+        ("smem_start", ctypes.c_ulong),
+        ("smem_len", ctypes.c_uint32),
+        ("type", ctypes.c_uint32),
+        ("type_aux", ctypes.c_uint32),
+        ("visual", ctypes.c_uint32),
+        ("xpanstep", ctypes.c_uint16),
+        ("ypanstep", ctypes.c_uint16),
+        ("ywrapstep", ctypes.c_uint16),
+        ("line_length", ctypes.c_uint32),
+        ("mmio_start", ctypes.c_ulong),
+        ("mmio_len", ctypes.c_uint32),
+        ("accel", ctypes.c_uint32),
+        ("capabilities", ctypes.c_uint16),
+        ("reserved", ctypes.c_uint16 * 2),
+    ]
+
+
 def read_framebuffer(fd):
     """Return the panel geometry and pixel layout of a framebuffer.
 
-    Returns a dict with xres, yres, bpp, the red/green/blue bit offsets and
-    the stride of one line, or None when the kernel does not answer.
+    Returns a dict with xres, yres, bpp, the red/green/blue bit offsets, the
+    visible origin and the stride of one line, or None when the kernel does
+    not answer.
     """
     import fcntl
+    var = FbVarScreeninfo()
     try:
-        var = bytearray(160)
         fcntl.ioctl(fd, FBIOGET_VSCREENINFO, var, True)
-        xres, yres = struct.unpack_from("=II", var, 0)
-        bpp = struct.unpack_from("=I", var, 24)[0]
-        red = struct.unpack_from("=I", var, 32)[0]
-        green = struct.unpack_from("=I", var, 44)[0]
-        blue = struct.unpack_from("=I", var, 56)[0]
-    except (OSError, struct.error):
+    except (OSError, ValueError):
         return None
-    # fb_fix_screeninfo: id[16], smem_start (a pointer), smem_len, type,
-    # type_aux, visual, three 16 bit panning fields, then line_length. The
-    # pointer makes the offset depend on the word size.
-    stride_off = 38 + struct.calcsize("P")
-    stride_off = (stride_off + 3) & ~3
+    fix = FbFixScreeninfo()
     stride = 0
     try:
-        fix = bytearray(160)
         fcntl.ioctl(fd, FBIOGET_FSCREENINFO, fix, True)
-        stride = struct.unpack_from("=I", fix, stride_off)[0]
-    except (OSError, struct.error):
+        stride = fix.line_length
+    except (OSError, ValueError):
         stride = 0
     return {
-        "xres": xres, "yres": yres, "bpp": bpp,
-        "red": red, "green": green, "blue": blue,
+        "xres": var.xres, "yres": var.yres, "bpp": var.bits_per_pixel,
+        "red": var.red.offset, "green": var.green.offset, "blue": var.blue.offset,
+        "xoffset": var.xoffset, "yoffset": var.yoffset,
         "stride": stride,
     }
 
@@ -404,7 +455,8 @@ def check_framebuffer(fd):
     """
     info = read_framebuffer(fd)
     if info is None:
-        return {"fmt": "rgb565", "stride": 0}  # cannot query: trust the device
+        # Cannot query: trust the device and assume a plain RGB565 panel.
+        return {"fmt": "rgb565", "stride": 0, "xoffset": 0, "yoffset": 0}
     if (info["xres"], info["yres"]) != (W, H):
         raise OSError("%s is %dx%d, expected %dx%d"
                       % (FB_DEV, info["xres"], info["yres"], W, H))
@@ -441,6 +493,7 @@ class App:
         self.updated = ""
         self.confirm_delete = False
         self.silent_scan = False
+        self.scan_origin = "menu"
         self.refresh_interval = _int_or_zero(read_config().get("refresh", 0))
         self.last_refresh = time.time()
         self.scanner = Scanner()
@@ -448,6 +501,7 @@ class App:
         self.mm = None
         self.fmt = "rgb565"
         self.stride = 0
+        self.origin = (0, 0)
         self._last_raw = None
         self._net_cache = None
         self._maps_cache = (0, [])
@@ -456,11 +510,14 @@ class App:
             info = check_framebuffer(self.fd)
             self.fmt = info["fmt"]
             self.stride = info["stride"]
+            self.origin = (info["xoffset"] * self.fmt_bytes(),
+                           info["yoffset"] * self.stride)
             row = W * self.fmt_bytes()
             if not self.stride or self.stride < row:
                 self.stride = row
+            length = self.stride * (H + info["yoffset"])
             try:
-                self.mm = mmap.mmap(self.fd, self.stride * H, mmap.MAP_SHARED,
+                self.mm = mmap.mmap(self.fd, length, mmap.MAP_SHARED,
                                     mmap.PROT_WRITE | mmap.PROT_READ)
             except (OSError, ValueError) as exc:
                 raise OSError("cannot map %dx%d framebuffer: %s"
@@ -480,13 +537,15 @@ class App:
             return  # nothing changed: skip the conversion
         self._last_raw = raw
         row = W * self.fmt_bytes()
-        if self.stride == row:
+        xoff, yoff = self.origin
+        if self.stride == row and not xoff and not yoff:
             self.mm.seek(0)
             self.mm.write(raw)
             return
-        # The panel pads its lines: write one row at a time.
+        # The panel pads its lines, and the visible area can start part way
+        # into the buffer: write one row at a time.
         for y in range(H):
-            self.mm.seek(y * self.stride)
+            self.mm.seek(yoff + y * self.stride + xoff)
             self.mm.write(raw[y * row:(y + 1) * row])
 
     def new_image(self):
@@ -667,6 +726,27 @@ class App:
         self.footer(d, [("esc", "cancel scan")])
         return img
 
+    def hosts_layout(self, draw, visible):
+        """Where each column of the host list starts and how wide it is.
+
+        Kept separate from the drawing so the invariants can be checked:
+        the columns must not overlap and nothing may run off the panel.
+        """
+        ip_w = max([draw.textlength(n["ip"], font=self.font_m)
+                    for n in visible] or [70])
+        ip_w = min(ip_w, 92)
+        x_ip = 14
+        x_host = x_ip + ip_w + 10
+        x_port = W - 8
+        # The port column is right aligned, so the name column only gets
+        # what is left after the widest port list.
+        port_w = max([draw.textlength(self.service_ports(n), font=self.font_ms)
+                      for n in visible] or [0])
+        port_w = min(port_w, 120)
+        name_room = x_port - port_w - 8 - x_host
+        return {"ip": x_ip, "host": x_host, "port": x_port,
+                "ip_w": ip_w, "port_w": port_w, "name_room": name_room}
+
     def draw_hosts(self):
         img = self.new_image()
         d = ImageDraw.Draw(img)
@@ -683,16 +763,13 @@ class App:
             self.scroll = self.sel - rows + 1
         visible = nodes[self.scroll:self.scroll + rows]
 
-        # Column widths come from the font, not from a guess.
-        ip_w = max([d.textlength(n["ip"], font=self.font_m) for n in visible]
-                   or [70])
-        ip_w = min(ip_w, 92)
-        x_ip = 14
-        x_host = x_ip + ip_w + 10
-        x_port = W - 8
+        col = self.hosts_layout(d, visible)
+        x_ip, x_host, x_port = col["ip"], col["host"], col["port"]
+        name_room = col["name_room"]
 
         d.text((x_ip, COL_Y), "Address", font=self.font_xs, fill=INK_DIM)
-        d.text((x_host, COL_Y), "Host", font=self.font_xs, fill=INK_DIM)
+        if name_room > 40:
+            d.text((x_host, COL_Y), "Host", font=self.font_xs, fill=INK_DIM)
         self.text_right(d, "Ports", COL_Y, self.font_xs, INK_DIM)
         self.rule(d, COL_RULE)
 
@@ -707,9 +784,8 @@ class App:
             name = node.get("hostname") or ""
             if not name and node["ip"] == gw:
                 name = "gateway"
-            if name:
-                room = x_port - 46 - x_host
-                d.text((x_host, y + 1), self.fit(d, name, self.font, room),
+            if name and name_room > 40:
+                d.text((x_host, y + 1), self.fit(d, name, self.font, name_room),
                        font=self.font_s, fill=INK_DIM)
             ports = self.service_ports(node)
             if ports:
@@ -742,39 +818,42 @@ class App:
         self.header(d, "Topology", "%d hosts" % len(nodes))
 
         cx, cy = W // 2, (BODY_TOP + BODY_BOT) // 2 + 2
-        outer = (114, 36)
-        inner = (58, 17)
 
-        # The gateway sits in the middle, the other hosts on a ring around it.
-        # The selection index is the same in both the list and the map, so
-        # the cursor never jumps to a different machine.
+        # The gateway sits in the middle, the other hosts on rings around it.
+        # Rings get smaller and busier as the network grows, so every host
+        # still gets a mark and the selection never points at the wrong one.
         others = [n for n in nodes if n["ip"] != gw]
-        cap = 10
-        if len(others) > cap:
-            rings = ((others[:cap], outer), (others[cap:cap + 8], inner))
-        else:
-            rings = ((others, outer),)
+        ring_specs = [(114, 36, 12), (84, 28, 10), (60, 20, 8),
+                      (42, 14, 6), (28, 9, 5)]
+        rings = []
+        left = others
+        for rx, ry, cap in ring_specs:
+            if not left:
+                break
+            take = left[:cap]
+            left = left[cap:]
+            rings.append((take, (rx, ry)))
+        overflow = left  # a /24 can hold more hosts than there are rings
+        # Labels need elbow room: past a dozen hosts the chart shows marks
+        # only, and the info band names the one under the cursor.
+        crowded = len(others) > 12
 
-        # Where every node sits, in list order.
-        spots = []
-        for node in nodes:
-            if node["ip"] == gw:
-                spots.append((node, cx, cy, 0.0))
-                continue
-            for ring, (rx, ry) in rings:
-                if node in ring:
-                    i = ring.index(node)
-                    ang = -math.pi / 2 + 2 * math.pi * i / len(ring)
-                    spots.append((node, cx + int(rx * math.cos(ang)),
-                                  cy + int(ry * math.sin(ang)), ang))
-                    break
+        # Where every node sits, keyed by address so a node that could not
+        # be placed can never shift the highlight onto another machine.
+        spots = {}
+        for ring, (rx, ry) in rings:
+            for i, node in enumerate(ring):
+                ang = -math.pi / 2 + 2 * math.pi * i / len(ring)
+                spots[node["ip"]] = (cx + int(rx * math.cos(ang)),
+                                     cy + int(ry * math.sin(ang)), ang)
+        spots[gw] = (cx, cy, 0.0)
 
         # The rings and the links are the paper the nodes sit on, so they go
         # down first: the gateway disc is painted over them afterwards.
         for _ring, (rx, ry) in rings:
             d.ellipse([cx - rx, cy - ry, cx + rx, cy + ry], outline=RULE)
-        for node, x, y, _ang in spots:
-            if node["ip"] == gw:
+        for ip, (x, y, _ang) in spots.items():
+            if ip == gw:
                 continue
             dx, dy = x - cx, y - cy
             dist = math.hypot(dx, dy) or 1
@@ -788,8 +867,14 @@ class App:
         d.text((cx - gw_w / 2, cy - 7), gw_text, font=self.font_s, fill=BG)
 
         self.map_sel = max(0, min(self.map_sel, len(nodes) - 1))
-        for index, (node, x, y, ang) in enumerate(spots):
-            selected = index == self.map_sel
+        selected_node = nodes[self.map_sel] if nodes else None
+        selected_ip = selected_node["ip"] if selected_node else ""
+        for node in nodes:
+            spot = spots.get(node["ip"])
+            if spot is None:
+                continue  # too many hosts for the chart; the list has it
+            x, y, ang = spot
+            selected = node["ip"] == selected_ip
             if node["ip"] == gw:
                 if selected:
                     d.rectangle([x - 17, y - 17, x + 17, y + 17], outline=AMBER)
@@ -801,6 +886,11 @@ class App:
             d.rectangle([x - 4, y - 4, x + 4, y + 4], fill=BG)
             d.rectangle([x - 3, y - 3, x + 3, y + 3],
                         fill=MINT if live else INK_FAINT)
+            # A crowded chart cannot carry a label for every host: only the
+            # selected one is named, the rest are marks to look up in the
+            # list.
+            if not selected and crowded:
+                continue
             label = host_label(node)
             tw = d.textlength(label, font=self.font_xs)
             sin_a, cos_a = math.sin(ang), math.cos(ang)
@@ -819,13 +909,17 @@ class App:
             d.text((lx, ly), label, font=self.font_xs,
                    fill=INK if selected else INK_DIM)
 
-        node = nodes[self.map_sel] if nodes else None
         left = ""
-        if node:
-            left = self.fit(d, "%s  %s" % (node["ip"],
-                                            self.service_names(node) or "-"),
+        if selected_node:
+            left = self.fit(d, "%s  %s" % (selected_node["ip"],
+                                            self.service_names(selected_node)
+                                            or "-"),
                             self.font_ms, 210)
-        self.info_strip(d, left, self.updated)
+        right = "%d hosts" % len(nodes)
+        if overflow:
+            right = "%d hosts, %d more" % (len(nodes) - len(overflow),
+                                           len(overflow))
+        self.info_strip(d, left, right)
         self.notice(d)
         self.footer(d, [("up/dn", "host"), ("enter", "back"), ("R", "rescan"),
                          ("S", "save"), ("esc", "back")])
@@ -842,11 +936,17 @@ class App:
             d.text((14, 88), "press S on a scan to keep one",
                    font=self.font_s, fill=INK_FAINT)
         else:
+            rows = 7
             self.map_index = max(0, min(self.map_index, len(maps) - 1))
+            # The window follows the selection, so every saved map is
+            # reachable however many there are.
+            if self.map_index < self.scroll:
+                self.scroll = self.map_index
+            if self.map_index >= self.scroll + rows:
+                self.scroll = self.map_index - rows + 1
             y = BODY_TOP + 4
-            for i, path in enumerate(maps[self.scroll:self.scroll + 7]):
-                index = self.scroll + i
-                selected = index == self.map_index
+            for path in maps[self.scroll:self.scroll + rows]:
+                selected = path == maps[self.map_index]
                 if selected:
                     d.rectangle([0, y - 2, W - 1, y + 12], fill=PANEL_HI)
                     d.rectangle([0, y - 2, 3, y + 12], fill=AMBER)
@@ -857,6 +957,10 @@ class App:
                     self.text_right(d, stamp, y + 1, self.font_ms,
                                     INK_DIM if selected else INK_FAINT)
                 y += 14
+            if len(maps) > rows:
+                first = self.scroll + 1
+                self.text_right(d, "%d of %d" % (first, len(maps)),
+                                BODY_BOT - 12, self.font_ms, INK_FAINT)
 
         if self.confirm_delete:
             self.info_strip(d, "press D again to delete", "esc cancels", CORAL)
@@ -908,16 +1012,17 @@ class App:
         self.scanner.start(subnet, thorough=bool(config.get("thorough")))
         self.silent_scan = silent
         if not silent:
+            self.scan_origin = self.screen
             self.screen = "scanning"
 
     def finish_scan(self):
         if self.scanner.cancelled:
-            self.error = "scan cancelled"
-            self.screen = "menu"
+            self.status = "scan stopped"
+            self.screen = self.scan_origin
             return
         if self.scanner.error:
             self.error = self.scanner.error
-            self.screen = "menu"
+            self.screen = self.scan_origin
             return
         self.topo = topology.build_topology(
             self.scanner.hosts, gateway=self.gateway, subnet=self.subnet
@@ -989,10 +1094,12 @@ class App:
                 if self.scanner.done:
                     self.finish_scan()
                 elif KEY_ESC in codes:
-                    # Stop the nmap child, then leave the screen.
+                    # Stop the nmap child, then leave the screen. A scan
+                    # the user called off is not a failure, and the view
+                    # they came from is still there.
                     self.scanner.cancel()
-                    self.error = "scan cancelled"
-                    self.screen = "menu"
+                    self.status = "scan stopped"
+                    self.screen = self.scan_origin
                 continue
             if self.scanner.done and self.silent_scan:
                 self.apply_silent_scan()
