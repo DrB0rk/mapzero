@@ -91,6 +91,18 @@ argument - nmap cannot parse a comma-separated list, and trying to made it scan
 every host on its own. nmap's XML output is parsed into hosts, ports,
 services and (from the kernel ARP cache) MAC addresses.
 
+## Limitations
+
+The scan is an **unprivileged TCP connect scan** (`-sT`), which is what a
+non-root app can do. That means:
+
+- Hosts that ignore every scanned port are invisible, even though the kernel
+  ARP cache knows them.
+- No MAC/vendor data comes from nmap; MACs are read from `/proc/net/arp`.
+- There are no traceroute hops - the topology is a flat star around the
+  gateway, not a routed path map.
+- The scan covers the device's own subnet only.
+
 ## Layout
 
 ```
@@ -107,6 +119,17 @@ tests/            unit tests (parsing, topology, UI flow)
 ```bash
 python3 -m unittest discover -s tests
 ```
+
+## Status
+
+Verified on a development host: real nmap sweeps of a live /24, the framebuffer
+renderer, the packaged `.deb`, and the store manifest.
+
+**Not verified on the Cardputer Zero itself.** The 320x170 panel, the 46-key
+evdev keycodes and the APPLaunch carousel have been implemented from the
+official documentation and the reference apps, but they have not been run on
+the device. Publishing to the store also needs a short video of the app
+running on real hardware.
 
 ## Legal
 

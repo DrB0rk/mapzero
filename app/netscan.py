@@ -124,12 +124,30 @@ def local_addresses():
 
 
 def local_cidr() -> str:
-    """Return the /24 network of this device as 'a.b.c.0/24'."""
+    """Return the network of this device as 'a.b.c.0/nn'.
+
+    The prefix comes from the interface address, so a /23 or /16 network is
+    scanned in full instead of just its first /24.
+    """
     addr, _gw = local_addresses()
     if not addr:
         return ""
-    net = ipaddress.ip_network(addr + "/24", strict=False)
+    prefix = _interface_prefix(addr)
+    net = ipaddress.ip_network("%s/%d" % (addr, prefix), strict=False)
     return str(net)
+
+
+def _interface_prefix(addr: str) -> int:
+    """Return the prefix length configured on the interface holding addr."""
+    try:
+        out = _run(["ip", "-4", "-o", "addr", "show"])
+    except OSError:
+        out = ""
+    for line in out.splitlines():
+        m = re.search(r"inet (\d+\.\d+\.\d+\.\d+)/(\d+)", line)
+        if m and m.group(1) == addr:
+            return int(m.group(2))
+    return 24
 
 
 def gateway_ip() -> str:
@@ -180,8 +198,12 @@ def parse_nmap_xml(xml_text: str) -> list:
                 vendor = addr.get("vendor", "")
         if not ip:
             continue
+        if set(mac) <= {"0", ":"}:
+            mac = ""  # nmap's placeholder for "could not resolve the MAC"
         if not mac:
             mac = arp.get(ip, "")
+        if set(mac) <= {"0", ":"}:
+            mac = ""
 
         hostname = ""
         for hn in host.findall("hostnames"):

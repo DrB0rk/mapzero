@@ -1,6 +1,33 @@
 {
   "kanvas": 1,
   "title": "mapzero",
-  "groups": [],
-  "tasks": []
+  "groups": [
+    {
+      "id": "APP",
+      "name": "app"
+    }
+  ],
+  "tasks": [
+    {
+      "id": "APP-01",
+      "title": "MapZero: nmap network topology mapper for Cardputer Zero",
+      "state": "proposed",
+      "group": "APP",
+      "at": "2026-11-19T20:10:46Z",
+      "by": "omp",
+      "desc": "Debian .deb for the M5 Cardputer Zero (Raspberry Pi CM0, arm64 Linux). Python 3 + PIL on /dev/fb0, evdev keyboard, real nmap scans, topology map, saved maps, APPLaunch .desktop entry. Installs via apt; repo github.com/DrB0rk/mapzero.",
+      "notes": [
+        {
+          "at": "2026-11-19T20:10:48Z",
+          "by": "omp",
+          "text": "Implementation complete (built ahead of board approval).\n\nDelivered: app/mapzero.py (framebuffer UI, evdev keys), app/netscan.py (nmap + XML parse), app/topology.py (graph + JSON store), packaging/ (desktop entry, launcher wrapper, icon), debian/ (control, postinst), build-deb.sh, install.sh, app-builder.json (store metadata), README.md, LICENSE, 29 unit tests, 2 live store screenshots.\n\nVerified by running: real nmap sweep of the local /24 -> 7 live hosts with MACs and services in ~8s; unprivileged -sT scan; deb built and installed with dpkg, desktop entry and wrapper present in /usr/share/APPLaunch; store manifest validated against every documented constraint.\n\nNot verified: the real device. evdev keycodes, the 320x170 panel and the APPLaunch carousel are unverified; the store also requires a device video for a first release."
+        },
+        {
+          "at": "2026-11-19T20:10:49Z",
+          "by": "omp",
+          "text": "Live renders from a real nmap sweep of the local /24\n\n![hosts](kanvas-files/ee1b1af4508c9e88.png)\n\n![map](kanvas-files/9320ee0417baad81.png)"
+        }
+      ]
+    }
+  ]
 }

@@ -4,8 +4,7 @@ Architecture: all
 Maintainer: DrB0rk <berk@berkderooij.nl>
 Section: net
 Priority: optional
-Depends: python3, python3-pil, nmap
-Recommends: python3-evdev
+Depends: python3, python3-pil, nmap, fonts-dejavu-core
 Homepage: https://github.com/DrB0rk/mapzero
 Description: MapZero - network topology mapper for the Cardputer Zero
  Scans the local network with nmap, draws the discovered hosts and their open

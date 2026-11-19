@@ -38,7 +38,7 @@ FBIOGET_VSCREENINFO = 0x4600
 
 FONT_PATHS = (
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
 )
 CONFIG_PATH = os.path.expanduser("~/.config/mapzero/config.json")
 
@@ -74,18 +74,31 @@ def rgb565(r, g, b):
     return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
 
 
+# Byte-wise maps for the RGB565 packing, so the hot loop runs in C.
+_R5 = bytes(i & 0xF8 for i in range(256))
+_GHI = bytes(i >> 5 for i in range(256))
+_GLO = bytes((i & 0x1C) << 3 for i in range(256))
+_BLO = bytes((i & 0xF8) >> 3 for i in range(256))
+
+
 def image_to_rgb565(img):
-    px = img.load()
-    buf = bytearray(W * H * 2)
-    i = 0
-    for y in range(H):
-        for x in range(W):
-            r, g, b = px[x, y][:3]
-            v = rgb565(r, g, b)
-            buf[i] = v & 0xFF
-            buf[i + 1] = (v >> 8) & 0xFF
-            i += 1 << 1
-    return bytes(buf)
+    """Pack an RGB image into little-endian RGB565 bytes.
+
+    PIL has no RGB565 mode, so the packing is done here. Each channel is
+    mapped through a translate table (C speed) and the two bytes are
+    interleaved with a slice assignment (also C speed).
+    """
+    raw = img.tobytes()
+    # high byte = (r & 0xF8) | (g >> 5)
+    high = bytes(x | y for x, y in
+                 zip(raw[0::3].translate(_R5), raw[1::3].translate(_GHI)))
+    # low byte = ((g & 0x1C) << 3) | ((b & 0xF8) >> 3)
+    low = bytes(x | y for x, y in
+                zip(raw[1::3].translate(_GLO), raw[2::3].translate(_BLO)))
+    out = bytearray(len(raw) // 3 * 2)
+    out[0::2] = low
+    out[1::2] = high
+    return bytes(out)
 
 
 def load_font(size):
@@ -96,6 +109,28 @@ def load_font(size):
             except OSError:
                 pass
     return ImageFont.load_default()
+
+
+def _int_or_zero(value):
+    """Coerce a config value to a non-negative int, 0 on anything odd."""
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return number if number > 0 else 0
+
+
+def host_label(node):
+    """A short, drawable label for a host: hostname else the last octet.
+
+    Names from mDNS or DNS can be non-ASCII, which the bitmap fallback font
+    cannot draw at all. Rather than mangle them into a wrong name, fall back
+    to the address.
+    """
+    name = (node.get("hostname") or "").strip()
+    if not name or not all(32 <= ord(ch) < 127 for ch in name):
+        return node["ip"].split(".")[-1]
+    return name[:8]
 
 
 def read_config():
@@ -170,6 +205,8 @@ class Scanner:
         self._thread = None
 
     def start(self, cidr, thorough=False):
+        """Start a scan, replacing any scan that is still running."""
+        self.stop()
         self.hosts = []
         self.error = ""
         self.done = False
@@ -179,6 +216,18 @@ class Scanner:
             target=self._run, args=(cidr, thorough), daemon=True
         )
         self._thread.start()
+
+    def stop(self):
+        """Cancel a running scan and wait for its thread to finish."""
+        if self._thread is None:
+            return
+        self.cancelled = True
+        if self._thread.is_alive():
+            self._thread.join(timeout=5)
+        self._thread = None
+
+    def running(self):
+        return self._thread is not None and self._thread.is_alive()
 
     def cancel(self):
         """Ask the running scan to stop."""
@@ -211,7 +260,8 @@ def check_framebuffer(fd):
     """Refuse to draw on a framebuffer that is not the device's 320x170 panel.
 
     Writing 320x170 of pixels into an arbitrary framebuffer corrupts whatever
-    else is using it, so fail loudly instead.
+    else is using it, so fail loudly instead. The pixel depth matters too:
+    RGB565 data on a 32bpp panel would come out as garbage colours.
     """
     try:
         import fcntl
@@ -219,11 +269,16 @@ def check_framebuffer(fd):
         buf = bytearray(160)
         fcntl.ioctl(fd, FBIOGET_VSCREENINFO, buf, True)
         xres, yres = _struct.unpack("=II", bytes(buf[:8]))
+        bpp = _struct.unpack("=I", bytes(buf[24:28]))[0]
     except OSError:
         return  # cannot query: trust the device
     if (xres, yres) != (W, H):
         raise OSError(
             "%s is %dx%d, expected %dx%d" % (FB_DEV, xres, yres, W, H)
+        )
+    if bpp and bpp != BPP * 8:
+        raise OSError(
+            "%s is %d bpp, expected %d" % (FB_DEV, bpp, BPP * 8)
         )
 
 
@@ -243,16 +298,21 @@ class App:
         self.status = ""
         self.error = ""
         self.silent_scan = False
-        self.refresh_interval = int(read_config().get("refresh", 0) or 0)
+        self.refresh_interval = _int_or_zero(read_config().get("refresh", 0))
         self.last_refresh = time.time()
         self.scanner = Scanner()
         self.fd = None
         self.mm = None
+        self._last_raw = None
         if fb_path is not None:
             self.fd = os.open(fb_path, os.O_RDWR)
             check_framebuffer(self.fd)
-            self.mm = mmap.mmap(self.fd, W * H * BPP, mmap.MAP_SHARED,
-                                mmap.PROT_WRITE | mmap.PROT_READ)
+            try:
+                self.mm = mmap.mmap(self.fd, W * H * BPP, mmap.MAP_SHARED,
+                                    mmap.PROT_WRITE | mmap.PROT_READ)
+            except (OSError, ValueError) as exc:
+                raise OSError("cannot map %dx%d framebuffer: %s"
+                              % (W, H, exc))
         self.input_fds = open_input_devices()
 
     # ---------------- rendering ----------------
@@ -260,6 +320,10 @@ class App:
     def blit(self, img):
         if self.mm is None:
             return
+        raw = img.tobytes()
+        if raw == self._last_raw:
+            return  # nothing changed: skip the expensive conversion
+        self._last_raw = raw
         self.mm.seek(0)
         self.mm.write(image_to_rgb565(img))
 
@@ -310,13 +374,43 @@ class App:
         self.header(d, "Hosts", "%d found" % len(self.topo["nodes"]))
         nodes = self.topo["nodes"]
         rows = 8
+        visible = nodes[self.scroll:self.scroll + rows]
+
+        def mac_of(node):
+            mac = (node.get("mac") or "").strip()
+            if set(mac) <= {"0", ":"}:  # nmap's "unknown" MAC
+                return ""
+            return mac[:17]
+
+        def fit_services(node):
+            """Shorten the port list until it fits the remaining width."""
+            ports = [str(s["port"]) for s in node["services"][:8]]
+            while ports:
+                text = ",".join(ports)
+                if x_svc + d.textlength(text, font=self.font_sm) <= W - 4:
+                    return text
+                ports.pop()
+            return ""
+
+        # Measure the columns instead of guessing x positions: the font is
+        # wider than the bitmap fallback on the device.
+        ip_w = max([d.textlength(n["ip"], font=self.font_sm) for n in visible]
+                   or [0])
+        mac_w = max([d.textlength(mac_of(n), font=self.font_sm) for n in visible]
+                    or [0])
+        x_ip = 6
+        x_mac = int(x_ip + ip_w + 6)
+        x_svc = int(x_mac + mac_w + 8)
+
         y = 22
-        for node in nodes[self.scroll:self.scroll + rows]:
-            d.text((6, y), node["ip"], font=self.font_sm, fill=FG)
-            mac = (node.get("mac") or "")[:17]
-            d.text((62, y), mac, font=self.font_sm, fill=DIM)
-            svc = ",".join(str(s["port"]) for s in node["services"][:8])
-            d.text((160, y), svc, font=self.font_sm, fill=OK)
+        for node in visible:
+            d.text((x_ip, y), node["ip"], font=self.font_sm, fill=FG)
+            mac = mac_of(node)
+            if mac:
+                d.text((x_mac, y), mac, font=self.font_sm, fill=DIM)
+            svc = fit_services(node)
+            if svc:
+                d.text((x_svc, y), svc, font=self.font_sm, fill=OK)
             y += 15
         if not nodes:
             d.text((10, 60), "no hosts found", font=self.font, fill=DIM)
@@ -339,7 +433,10 @@ class App:
 
         # gateway in the middle
         d.ellipse([cx - 16, cy - 16, cx + 16, cy + 16], outline=ACCENT, width=2)
-        d.text((cx - 14, cy - 19), "GW", font=self.font_sm, fill=ACCENT)
+        gw_label = "GW"
+        gw_w = d.textlength(gw_label, font=self.font_sm)
+        d.text((cx - gw_w / 2, cy - gw_w / 2 - 1), gw_label,
+               font=self.font_sm, fill=ACCENT)
 
         others = [n for n in nodes if n["ip"] != gw_ip]
         count = len(others)
@@ -355,7 +452,7 @@ class App:
                 y = cy + int(r * math.sin(angle))
                 d.line([(cx, cy), (x, y)], fill=(58, 64, 74))
                 d.ellipse([x - 3, y - 3, x + 3, y + 3], fill=OK)
-                label = (node["hostname"] or node["ip"].split(".")[-1])[:8]
+                label = host_label(node)
                 tw = d.textlength(label, font=self.font_sm)
                 lx = x + 5
                 if lx + tw > W - 4:
@@ -448,7 +545,7 @@ class App:
         interval = self.refresh_interval
         if not interval or self.screen not in ("hosts", "map"):
             return
-        if self.scanner.progress and not self.scanner.done:
+        if self.scanner.running():
             return  # a scan is already running
         now = time.time()
         if now - self.last_refresh < interval:
@@ -456,6 +553,14 @@ class App:
         self.last_refresh = now
         self.start_scan(silent=True)
         self.status = "auto-refreshing..."
+
+    def rescan(self):
+        """Re-run the scan in the background and refresh the view."""
+        if self.scanner.running():
+            self.status = "scan already running"
+            return
+        self.start_scan(silent=True)
+        self.status = "rescanning..."
 
     def save_current(self):
         if not self.topo:
@@ -535,8 +640,7 @@ class App:
         elif code == KEY_S:
             self.save_current()
         elif code == KEY_R:
-            self.start_scan(silent=True)
-            self.status = "rescanning..."
+            self.rescan()
         elif code == KEY_ESC:
             self.screen = "menu"
 
@@ -544,8 +648,7 @@ class App:
         if code == KEY_S:
             self.save_current()
         elif code == KEY_R:
-            self.start_scan(silent=True)
-            self.status = "rescanning..."
+            self.rescan()
         elif code in (KEY_ESC, KEY_ENTER):
             self.screen = "hosts"
 
