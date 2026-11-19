@@ -61,6 +61,11 @@
           "at": "2026-11-19T22:25:06Z",
           "by": "omp",
           "text": "Added vulnerability scanning: nmap NSE scripts and nuclei. V on a host checks that host (wide port set plus version detection, so services and their products and versions are found and merged back into the topology); Check whole network in the menu does the same over every host found. Findings are shown with their CVE, a CVSS score and a severity colour, and are stored on the node so a saved map keeps them; a rescan no longer throws them away. The scanners poll their child, so Esc stops them at once instead of waiting out the timeout, and a cancelled scan cannot overwrite the results of a newer one. OpenVAS was left out: it is a server product and will not fit in the device's 352 MB."
+        },
+        {
+          "at": "2026-11-19T22:27:12Z",
+          "by": "omp",
+          "text": "Vulnerability scanning on the device: the host list after a deep check (service names and products detected), and the findings screen showing 31 real CVEs with their CVSS score, coloured by severity. Captured straight out of /dev/fb0 on the Cardputer Zero.\n\n![dev_vulns](kanvas-files/1c73a10a9e52b72d.png)\n\n![dev_hosts](kanvas-files/c92d3946935a833b.png)"
         }
       ]
     }
