@@ -38,6 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import netscan
 import topology
+import vulnscan
 
 FB_DEV = "/dev/fb0"
 W, H = 320, 170
@@ -76,6 +77,7 @@ KEY_C = 46
 KEY_S = 31
 KEY_D = 32
 KEY_R = 19
+KEY_V = 47
 
 # The Cardputer Zero has no cursor keys: F, Z, X and C sit where a d-pad
 # would, and the vendor asks apps to read them as arrows.
@@ -96,6 +98,16 @@ AMBER = (243, 180, 66)     # selection, focus, the gateway
 MINT = (99, 213, 172)      # something that answered
 CORAL = (241, 111, 97)     # failures
 
+# Severity, worst first. A critical finding must be the loudest thing on
+# the panel, so the colours climb towards warm.
+SEVERITY_COLORS = {
+    "critical": (255, 92, 92),
+    "high": (250, 146, 72),
+    "medium": (243, 196, 84),
+    "low": (140, 200, 214),
+    "info": (139, 176, 196),
+}
+
 # Layout, in pixels.
 HDR_H = 17                 # header band, hairline under it
 RULE_Y = 17
@@ -110,7 +122,7 @@ FTR_RULE = 153             # key legend at the very bottom
 FTR_TOP = 154
 FTR_BOT = 169
 
-MENU = ("Scan network", "Saved maps", "Quit")
+MENU = ("Scan network", "Check whole network", "Saved maps", "Quit")
 
 
 def rgb565(r, g, b):
@@ -308,6 +320,95 @@ class Scanner:
             self.done = True
             return
         self.hosts = hosts
+        self.error = error
+        self.done = True
+
+
+class VulnScanner:
+    """Runs a vulnerability scan in a thread and reports progress.
+
+    The scan can target one host or every host found so far. The findings
+    are kept per host so the UI can show them next to the machine they
+    belong to.
+    """
+
+    def __init__(self):
+        self.findings = []
+        self.services = {}
+        self.error = ""
+        self.done = False
+        self.progress = ""
+        self.cancelled = False
+        self._thread = None
+        self._generation = 0
+        self._cancel = threading.Event()
+
+    def start(self, targets, ports="", engines=("nmap", "nuclei"), timeout=600,
+              service_scan=False):
+        """Start a scan, replacing any scan that is still running."""
+        self.stop()
+        self.findings = []
+        self.services = {}
+        self.error = ""
+        self.done = False
+        self.cancelled = False
+        self.progress = "checking %s" % (targets[0] if targets else "network")
+        # Each scan gets a number and its own cancel flag. An older scan
+        # that is still winding down must not write its results over a
+        # newer one, and must still be able to see that it was cancelled.
+        self._generation += 1
+        generation = self._generation
+        self._cancel = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            args=(targets, ports, engines, timeout, generation, self._cancel,
+                  service_scan),
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self):
+        if self._thread is None:
+            return
+        self.cancelled = True
+        self._cancel.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=5)
+        self._thread = None
+
+    def running(self):
+        return self._thread is not None and self._thread.is_alive()
+
+    def cancel(self):
+        self.cancelled = True
+        self._cancel.set()
+
+    def is_cancelled(self):
+        return self.cancelled
+
+    def _set_progress(self, text, done=0, total=0, found=0):
+        self.progress = text
+        self.found = found
+
+    def _run(self, targets, ports, engines, timeout, generation, cancel,
+             service_scan=False):
+        try:
+            findings, error, services = vulnscan.scan(
+                targets, ports=ports, engines=engines, timeout=timeout,
+                cancelled=cancel.is_set, progress=self._set_progress,
+                service_scan=service_scan,
+            )
+        except Exception as exc:  # keep the UI alive on any scan failure
+            if generation == self._generation:
+                self.error = str(exc)
+                self.done = True
+            return
+        if generation != self._generation or cancel.is_set():
+            # A newer scan has already started, or the user called this one
+            # off: either way its results are not the ones on screen.
+            return
+        self.findings = findings
+        self.services = services
         self.error = error
         self.done = True
 
@@ -515,9 +616,14 @@ class App:
         self.confirm_delete = False
         self.silent_scan = False
         self.scan_origin = "menu"
+        self.vuln_index = 0
+        self.vuln_origin = "hosts"
+        self.vuln_target = ""
         self.refresh_interval = _int_or_zero(read_config().get("refresh", 0))
         self.last_refresh = time.time()
         self.scanner = Scanner()
+        self.vuln_scanner = VulnScanner()
+        self.findings = []
         self.fd = None
         self.mm = None
         self.fmt = "rgb565"
@@ -675,6 +781,24 @@ class App:
         extra = len(services) - len(ports)
         return ", ".join(ports) + (" +%d" % extra if extra > 0 else "")
 
+    def service_summary(self, node, limit=3):
+        """The service names of a node, as a short comma separated list.
+
+        "http, ssh" tells you more at a glance than "80, 22", and it is
+        what the deep scan detects: the service name, the product and the
+        version.
+        """
+        names = []
+        for service in node.get("services", [])[:limit]:
+            label = (service.get("name") or "").split(" (")[0]
+            if label:
+                names.append(label)
+        extra = len(node.get("services", [])) - len(names)
+        text = ", ".join(names)
+        if extra > 0:
+            text += " +%d" % extra
+        return text
+
     def service_names(self, node, limit=3):
         """Service names of a node, without the version noise."""
         names = []
@@ -704,19 +828,18 @@ class App:
                 d.text((18, y), item, font=self.font, fill=INK)
             else:
                 d.text((18, y), item, font=self.font, fill=INK_DIM)
-            if item == "Scan network" and subnet:
-                self.text_right(d, subnet, y + 1, self.font_ms, INK_FAINT)
-            elif item == "Saved maps" and maps:
+            if item == "Saved maps" and maps:
                 self.text_right(d, "%d saved" % len(maps), y + 1,
                                 self.font_ms, INK_FAINT)
-            y += 22
+            y += 21
 
+        # The network this device sits on, in the info band.
+        left = ""
         if subnet:
-            d.text((18, 120), "target", font=self.font_xs, fill=INK_FAINT)
-            d.text((70, 119), subnet, font=self.font_ms, fill=INK_DIM)
-        if gateway:
-            d.text((18, 132), "gateway", font=self.font_xs, fill=INK_FAINT)
-            d.text((70, 131), gateway, font=self.font_ms, fill=INK_DIM)
+            left = "target %s" % subnet
+            if gateway:
+                left += "  gw %s" % gateway
+        self.info_strip(d, left, "")
 
         self.notice(d)
         self.footer(d, [("up/dn", "move"), ("enter", "open"), ("esc", "quit")])
@@ -747,6 +870,74 @@ class App:
         self.footer(d, [("esc", "cancel scan")])
         return img
 
+    def draw_vulns(self):
+        """The findings of the last vulnerability scan."""
+        img = self.new_image()
+        d = ImageDraw.Draw(img)
+        findings = self.findings
+        self.header(d, "Vulnerabilities", self.vuln_target)
+
+        rows = 7
+        if self.vuln_index >= len(findings):
+            self.vuln_index = max(0, len(findings) - 1)
+        visible = findings[self.vuln_index:self.vuln_index + rows]
+
+        if not findings:
+            d.text((14, 70), "nothing found", font=self.font, fill=INK_DIM)
+            d.text((14, 88), "run V on a host to check it",
+                   font=self.font_s, fill=INK_FAINT)
+        else:
+            y = BODY_TOP + 4
+            for finding in visible:
+                color = SEVERITY_COLORS.get(finding.severity, INK_DIM)
+                # A severity bar reads at a glance on a 320px panel.
+                d.rectangle([8, y, 11, y + 12], fill=color)
+                d.text((18, y), finding.cve or finding.title or finding.script,
+                       font=self.font_m, fill=color)
+                score = ("%.1f" % finding.cvss) if finding.cvss else ""
+                if score:
+                    self.text_right(d, score, y + 1, self.font_ms, INK_DIM)
+                y += 14
+
+        finding = findings[self.vuln_index] if findings else None
+        left = ""
+        if finding:
+            detail = finding.title or finding.script
+            if finding.cve and detail:
+                detail = "%s  %s" % (finding.cve, detail)
+            left = self.fit(d, detail, self.font_ms, 200)
+        right = "%d of %d" % (self.vuln_index + 1, len(findings))
+        if not findings:
+            right = ""
+        self.info_strip(d, left, right)
+        self.notice(d)
+        self.footer(d, [("up/dn", "move"), ("V", "rescan"), ("esc", "back")])
+        return img
+
+    def draw_vuln_scanning(self):
+        img = self.new_image()
+        d = ImageDraw.Draw(img)
+        self.header(d, "Checking", self.vuln_target)
+        sc = self.vuln_scanner
+
+        engines = []
+        if vulnscan.nuclei_binary():
+            engines.append("nuclei")
+        engines.insert(0, "nmap")
+        d.text((14, 32), " + ".join(engines), font=self.font_m, fill=MINT)
+        d.text((14, 52), "looking for known flaws", font=self.font, fill=INK)
+
+        bx, by, bw, bh = 14, 78, W - 28, 8
+        d.rectangle([bx, by, bx + bw, by + bh], fill=RULE)
+        d.text((14, 94), sc.progress or "starting...", font=self.font_s,
+               fill=INK_DIM)
+        self.text_right(d, "%d found" % len(sc.findings), 94, self.font_s, MINT)
+
+        d.text((14, 114), "this takes a while on a small network",
+               font=self.font_xs, fill=INK_FAINT)
+        self.footer(d, [("esc", "cancel")])
+        return img
+
     def hosts_layout(self, draw, visible):
         """Where each column of the host list starts and how wide it is.
 
@@ -759,11 +950,11 @@ class App:
         x_ip = 14
         x_host = x_ip + ip_w + 10
         x_port = W - 8
-        # The port column is right aligned, so the name column only gets
-        # what is left after the widest port list.
-        port_w = max([draw.textlength(self.service_ports(n), font=self.font_ms)
+        # The service column is right aligned, so the name column only gets
+        # what is left after the widest service list.
+        port_w = max([draw.textlength(self.service_summary(n), font=self.font_ms)
                       for n in visible] or [0])
-        port_w = min(port_w, 120)
+        port_w = min(port_w, 130)
         name_room = x_port - port_w - 8 - x_host
         return {"ip": x_ip, "host": x_host, "port": x_port,
                 "ip_w": ip_w, "port_w": port_w, "name_room": name_room}
@@ -791,7 +982,7 @@ class App:
         d.text((x_ip, COL_Y), "Address", font=self.font_xs, fill=INK_DIM)
         if name_room > 40:
             d.text((x_host, COL_Y), "Host", font=self.font_xs, fill=INK_DIM)
-        self.text_right(d, "Ports", COL_Y, self.font_xs, INK_DIM)
+        self.text_right(d, "Services", COL_Y, self.font_xs, INK_DIM)
         self.rule(d, COL_RULE)
 
         y = COL_RULE + 5
@@ -808,10 +999,20 @@ class App:
             if name and name_room > 40:
                 d.text((x_host, y + 1), self.fit(d, name, self.font, name_room),
                        font=self.font_s, fill=INK_DIM)
-            ports = self.service_ports(node)
-            if ports:
-                pw = d.textlength(ports, font=self.font_ms)
-                d.text((x_port - pw, y + 1), ports, font=self.font_ms, fill=MINT)
+            services = self.service_summary(node)
+            if services:
+                pw = d.textlength(services, font=self.font_ms)
+                d.text((x_port - pw, y + 1), services, font=self.font_ms,
+                       fill=MINT)
+            # A host with known problems is marked, so the worst news is
+            # visible without opening every host.
+            findings = node.get("findings") or []
+            if findings:
+                worst = min((vulnscan.severity_rank(f.get("severity", "info"))
+                             for f in findings))
+                color = SEVERITY_COLORS.get(
+                    vulnscan.SEVERITIES[worst], CORAL)
+                d.rectangle([6, y + 2, 9, y + 5], fill=color)
             y += 14
 
         if not nodes:
@@ -821,14 +1022,22 @@ class App:
 
         node = nodes[self.sel] if nodes else None
         left = ""
+        right = self.updated
         if node:
             left = self.fit(d, "%s  %s" % (node["ip"],
                                             node.get("mac") or "no mac"),
                             self.font_ms, 210)
-        self.info_strip(d, left, self.updated)
+            known = node.get("findings") or []
+            if known:
+                worst = min(vulnscan.severity_rank(f.get("severity", "info"))
+                            for f in known)
+                right = "%d finding%s, %s" % (
+                    len(known), "" if len(known) == 1 else "s",
+                    vulnscan.SEVERITIES[worst])
+        self.info_strip(d, left, right)
         self.notice(d)
-        self.footer(d, [("up/dn", "move"), ("enter", "map"), ("R", "rescan"),
-                         ("S", "save"), ("esc", "back")])
+        self.footer(d, [("up/dn", "move"), ("V", "check"), ("enter", "map"),
+                         ("R", "rescan"), ("esc", "back")])
         return img
 
     def draw_map(self):
@@ -1015,6 +1224,10 @@ class App:
             return self.draw_hosts()
         if self.screen == "map":
             return self.draw_map()
+        if self.screen == "vulnscan":
+            return self.draw_vuln_scanning()
+        if self.screen == "vulns":
+            return self.draw_vulns()
         return self.draw_maps()
 
     # ---------------- actions ----------------
@@ -1046,7 +1259,8 @@ class App:
             self.screen = self.scan_origin
             return
         self.topo = topology.build_topology(
-            self.scanner.hosts, gateway=self.gateway, subnet=self.subnet
+            self.scanner.hosts, gateway=self.gateway, subnet=self.subnet,
+            previous=self.topo,
         )
         self.scroll = 0
         self.sel = 0
@@ -1054,14 +1268,127 @@ class App:
         self.updated = "updated %s" % time.strftime("%H:%M")
         self.screen = "hosts"
 
+    def vuln_engines(self):
+        """The engines to run, from the config, minus the ones not installed."""
+        config = read_config()
+        wanted = config.get("vuln_engines") or ["nmap", "nuclei"]
+        engines = []
+        for name in wanted:
+            if name == "nmap":
+                engines.append("nmap")
+            elif name == "nuclei" and vulnscan.nuclei_binary():
+                engines.append("nuclei")
+        return engines or ["nmap"]
+
+    def vuln_targets(self, whole_network=False):
+        """The hosts to check, and the ports worth checking on each.
+
+        A single host is checked on the ports it already has open, which
+        keeps the scan quick. The whole network is checked on the common
+        ports, since there is nothing else to go on. Without a scan to
+        go on, the subnet itself is the target.
+        """
+        nodes = self.hosts()
+        if whole_network:
+            if nodes:
+                return [n["ip"] for n in nodes], netscan.QUICK_PORTS
+            return [self.subnet], netscan.QUICK_PORTS
+        node = nodes[self.sel] if nodes else None
+        if not node:
+            return [], ""
+        ports = [s["port"] for s in node.get("services", [])]
+        return [node["ip"]], ",".join(str(p) for p in ports)
+
+    def start_vuln_scan(self, whole_network=False):
+        """Start a vulnerability scan of one host, or of the whole network."""
+        targets, ports = self.vuln_targets(whole_network)
+        if not targets:
+            self.status = "nothing to check yet"
+            return
+        self.vuln_origin = self.screen
+        self.vuln_target = self.subnet if whole_network else targets[0]
+        self.vuln_index = 0
+        self.findings = []
+        # A single host also gets its services looked at properly: the wide
+        # port set and the version probes. The whole network keeps to the
+        # ports the quick scan found, because that is ten times the work.
+        self.vuln_scanner.start(targets, ports=ports,
+                                engines=self.vuln_engines(),
+                                timeout=int(read_config().get("vuln_timeout", 600)),
+                                service_scan=not whole_network)
+        self.screen = "vulnscan"
+
+    def merge_services(self, services):
+        """Fold newly detected services back into the topology.
+
+        A deep check finds ports the quick scan missed, and knows the
+        product and version of each one. The node is updated in place so
+        the host list and the map show what was actually found.
+        """
+        if not services or not self.topo:
+            return
+        for node in self.topo["nodes"]:
+            found = services.get(node["ip"])
+            if not found:
+                continue
+            merged = {}
+            for service in node.get("services", []):
+                merged[service["port"]] = service
+            for service in found:
+                label = service["name"] or "unknown"
+                if service["product"]:
+                    label += " (%s" % service["product"]
+                    if service["version"]:
+                        label += " %s" % service["version"]
+                    label += ")"
+                merged[service["port"]] = {"port": service["port"],
+                                           "name": label}
+            node["services"] = [merged[p] for p in sorted(merged)]
+
+    def merge_findings(self, findings):
+        """Store the findings on the nodes they belong to.
+
+        They live on the node so a saved map keeps them: reopening a map
+        shows what was found, without scanning again.
+        """
+        if not findings or not self.topo:
+            return
+        by_host = {}
+        for finding in findings:
+            by_host.setdefault(finding.host, []).append(finding)
+        for node in self.topo["nodes"]:
+            found = by_host.get(node["ip"])
+            if not found:
+                continue
+            node["findings"] = [{
+                "cve": f.cve,
+                "cvss": f.cvss,
+                "severity": f.severity,
+                "title": f.title,
+                "source": f.source,
+            } for f in found]
+
+    def finish_vuln_scan(self):
+        if self.vuln_scanner.cancelled:
+            self.status = "check stopped"
+            self.screen = self.vuln_origin
+            return
+        self.findings = self.vuln_scanner.findings
+        self.merge_services(self.vuln_scanner.services)
+        self.merge_findings(self.vuln_scanner.findings)
+        self.vuln_index = 0
+        if self.vuln_scanner.error:
+            self.error = self.vuln_scanner.error
+        self.screen = "vulns"
+
     def apply_silent_scan(self):
-        """Fold a background rescan into the current view."""
         self.silent_scan = False
         self.scanner.done = False
         if self.scanner.cancelled or self.scanner.error:
             return
         self.topo = topology.build_topology(
-            self.scanner.hosts, gateway=self.gateway, subnet=self.subnet
+            self.scanner.hosts, gateway=self.gateway, subnet=self.subnet,
+            previous=self.topo,
         )
         self.updated = "updated %s" % time.strftime("%H:%M")
         self.status = self.updated
@@ -1102,7 +1429,26 @@ class App:
             self.scroll = 0
             self.sel = 0
             self.map_sel = 0
+            # A saved map keeps its findings, so they are there again
+            # without scanning.
+            self.findings = self.findings_of(topo)
             self.screen = "hosts"
+
+    def findings_of(self, topo):
+        """The findings of a topology, as Finding records."""
+        found = []
+        for node in (topo or {}).get("nodes", []):
+            for record in node.get("findings", []):
+                found.append(vulnscan.Finding(
+                    cve=record.get("cve", ""),
+                    cvss=record.get("cvss", 0.0),
+                    title=record.get("title", ""),
+                    host=node.get("ip", ""),
+                    source=record.get("source", ""),
+                    script=record.get("severity", ""),
+                ))
+        found.sort(key=lambda f: (-f.cvss, f.cve))
+        return found
 
     # ---------------- main loop ----------------
 
@@ -1121,6 +1467,14 @@ class App:
                     self.scanner.cancel()
                     self.status = "scan stopped"
                     self.screen = self.scan_origin
+                continue
+            if self.screen == "vulnscan":
+                if self.vuln_scanner.done:
+                    self.finish_vuln_scan()
+                elif KEY_ESC in codes:
+                    self.vuln_scanner.cancel()
+                    self.status = "check stopped"
+                    self.screen = self.vuln_origin
                 continue
             if self.scanner.done and self.silent_scan:
                 self.apply_silent_scan()
@@ -1141,6 +1495,8 @@ class App:
                     self.map_keys(code)
                 elif self.screen == "maps":
                     self.maps_keys(code)
+                elif self.screen == "vulns":
+                    self.vulns_keys(code)
 
     def menu_keys(self, code):
         if code in UP_KEYS:
@@ -1151,6 +1507,8 @@ class App:
             choice = MENU[self.menu_index]
             if choice == "Scan network":
                 self.start_scan()
+            elif choice == "Check whole network":
+                self.start_vuln_scan(whole_network=True)
             elif choice == "Saved maps":
                 self.maps = topology.list_maps()
                 self.map_index = 0
@@ -1175,6 +1533,8 @@ class App:
             self.save_current()
         elif code == KEY_R:
             self.rescan()
+        elif code == KEY_V:
+            self.start_vuln_scan()
         elif code == KEY_ESC:
             self.screen = "menu"
 
@@ -1191,6 +1551,18 @@ class App:
         elif code in (KEY_ESC, KEY_ENTER, KEY_LEFT):
             self.sel = self.map_sel
             self.screen = "hosts"
+
+    def vulns_keys(self, code):
+        if code in DOWN_KEYS:
+            self.vuln_index = min(self.vuln_index + 1,
+                                  max(0, len(self.findings) - 1))
+        elif code in UP_KEYS:
+            self.vuln_index = max(0, self.vuln_index - 1)
+        elif code == KEY_V:
+            # Check again, the same way it was checked the first time.
+            self.start_vuln_scan(whole_network=self.vuln_target == self.subnet)
+        elif code == KEY_ESC:
+            self.screen = self.vuln_origin
 
     def maps_keys(self, code):
         if code in DOWN_KEYS:

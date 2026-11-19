@@ -1,6 +1,6 @@
 {
   "package_name": "mapzero",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "app_name": "MapZero",
   "bin_name": "mapzero",
   "description": "Network topology mapper: scans the local network with nmap, draws the topology and saves it",

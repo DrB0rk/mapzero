@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import mapzero
 import netscan
 import topology
+import vulnscan
 
 
 class UiFlowTest(unittest.TestCase):
@@ -76,13 +77,13 @@ class UiFlowTest(unittest.TestCase):
                 topology.SAVE_DIR = original
 
     def test_menu_navigation_wraps(self):
+        count = len(mapzero.MENU)
         self.app.menu_index = 0
         self.keys = [mapzero.KEY_DOWN]
         self.app.menu_keys(self.keys[0])
         self.assertEqual(self.app.menu_index, 1)
-        self.keys = [mapzero.KEY_DOWN, mapzero.KEY_DOWN]
-        for code in self.keys:
-            self.app.menu_keys(code)
+        for _ in range(count - 1):
+            self.app.menu_keys(mapzero.KEY_DOWN)
         self.assertEqual(self.app.menu_index, 0)  # wrapped around
 
     def test_saved_maps_screen_lists_and_opens(self):
@@ -121,6 +122,68 @@ class UiFlowTest(unittest.TestCase):
                 self.assertEqual(len(topology.list_maps()), 0)
             finally:
                 topology.SAVE_DIR = original
+
+    def test_v_key_checks_the_selected_host(self):
+        """V runs a vulnerability scan of the host under the cursor."""
+        hosts = []
+        for ip in ("10.0.0.1", "10.0.0.5"):
+            h = netscan.Host(ip=ip, mac="", hostname="")
+            h.ports.append(netscan.Port(number=22, proto="tcp", state="open",
+                                         service="ssh"))
+            hosts.append(h)
+        self.app.topo = topology.build_topology(hosts, gateway="10.0.0.1")
+        self.app.screen = "hosts"
+        self.app.sel = 1
+
+        started = {}
+        self.app.vuln_scanner.start = lambda targets, **kw: started.update(
+            targets=targets, **kw)
+        self.app.hosts_keys(mapzero.KEY_V)
+        self.assertEqual(self.app.screen, "vulnscan")
+        self.assertEqual(started["targets"], ["10.0.0.5"])
+        # Only the ports that host actually has open are worth checking.
+        self.assertEqual(started["ports"], "22")
+
+    def test_checking_the_whole_network_targets_every_host(self):
+        hosts = []
+        for ip in ("10.0.0.1", "10.0.0.5"):
+            hosts.append(netscan.Host(ip=ip, mac="", hostname=""))
+        self.app.topo = topology.build_topology(hosts, gateway="10.0.0.1")
+        self.app.screen = "hosts"
+
+        started = {}
+        self.app.vuln_scanner.start = lambda targets, **kw: started.update(
+            targets=targets, **kw)
+        self.app.start_vuln_scan(whole_network=True)
+        self.assertEqual(self.app.screen, "vulnscan")
+        self.assertEqual(started["targets"], ["10.0.0.1", "10.0.0.5"])
+
+    def test_findings_land_on_the_vulnerability_screen(self):
+        self.app.findings = []
+        self.app.vuln_scanner.findings = [
+            vulnscan.Finding(cve="CVE-2021-44228", cvss=10.0,
+                             title="Log4Shell", host="10.0.0.1"),
+        ]
+        self.app.vuln_scanner.error = ""
+        self.app.vuln_origin = "hosts"
+        self.app.finish_vuln_scan()
+        self.assertEqual(self.app.screen, "vulns")
+        self.assertEqual(len(self.app.findings), 1)
+
+    def test_vulnerability_screen_scrolls(self):
+        self.app.findings = [vulnscan.Finding(cve="CVE-%d" % i, cvss=5.0)
+                             for i in range(4)]
+        self.app.screen = "vulns"
+        self.app.vulns_keys(mapzero.KEY_DOWN)
+        self.assertEqual(self.app.vuln_index, 1)
+        self.app.vulns_keys(mapzero.KEY_UP)
+        self.assertEqual(self.app.vuln_index, 0)
+
+    def test_escape_leaves_the_vulnerability_screen(self):
+        self.app.screen = "vulns"
+        self.app.vuln_origin = "hosts"
+        self.app.vulns_keys(mapzero.KEY_ESC)
+        self.assertEqual(self.app.screen, "hosts")
 
     def test_escape_cancels_a_delete(self):
         import tempfile

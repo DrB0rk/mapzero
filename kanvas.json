@@ -56,6 +56,11 @@
           "at": "2026-11-19T21:58:43Z",
           "by": "omp",
           "text": "Attached three frames captured straight out of /dev/fb0 on the Cardputer Zero with the launcher stopped, so the images show the app owning the panel with no carousel overlay. They came from a real scan of 10.0.1.0/24 that found 8 hosts. The launcher was restarted afterwards and is active again."
+        },
+        {
+          "at": "2026-11-19T22:25:06Z",
+          "by": "omp",
+          "text": "Added vulnerability scanning: nmap NSE scripts and nuclei. V on a host checks that host (wide port set plus version detection, so services and their products and versions are found and merged back into the topology); Check whole network in the menu does the same over every host found. Findings are shown with their CVE, a CVSS score and a severity colour, and are stored on the node so a saved map keeps them; a rescan no longer throws them away. The scanners poll their child, so Esc stops them at once instead of waiting out the timeout, and a cancelled scan cannot overwrite the results of a newer one. OpenVAS was left out: it is a server product and will not fit in the device's 352 MB."
         }
       ]
     }

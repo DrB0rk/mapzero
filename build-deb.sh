@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 VERSION=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' app-builder.json | head -1)
 PKG=mapzero
 
-python3 -m py_compile app/mapzero.py app/netscan.py app/topology.py
+python3 -m py_compile app/mapzero.py app/netscan.py app/topology.py app/vulnscan.py
 
 root=$(mktemp -d)
 trap 'rm -rf "$root"' EXIT
@@ -15,6 +15,7 @@ chmod 0755 "$root"
 install -D -m 0644 app/mapzero.py  "$root/usr/share/APPLaunch/apps/$PKG/mapzero.py"
 install -D -m 0644 app/netscan.py  "$root/usr/share/APPLaunch/apps/$PKG/netscan.py"
 install -D -m 0644 app/topology.py "$root/usr/share/APPLaunch/apps/$PKG/topology.py"
+install -D -m 0644 app/vulnscan.py "$root/usr/share/APPLaunch/apps/$PKG/vulnscan.py"
 install -D -m 0644 packaging/mapzero.desktop "$root/usr/share/APPLaunch/applications/$PKG.desktop"
 install -D -m 0644 packaging/icon.png "$root/usr/share/APPLaunch/share/images/$PKG.png"
 install -D -m 0755 packaging/mapzero.sh "$root/usr/share/APPLaunch/bin/$PKG"

@@ -83,6 +83,43 @@ class TopologyTest(unittest.TestCase):
             finally:
                 topology.SAVE_DIR = original
 
+    def test_findings_survive_a_save_and_load(self):
+        """A saved map keeps the findings, so reopening shows them."""
+        with tempfile.TemporaryDirectory() as tmp:
+            original = topology.SAVE_DIR
+            topology.SAVE_DIR = tmp
+            try:
+                topo = topology.build_topology(self.hosts, gateway="10.0.0.1")
+                topo["nodes"][0]["findings"] = [
+                    {"cve": "CVE-2021-44228", "cvss": 10.0,
+                     "severity": "critical", "title": "Log4Shell",
+                     "source": "nmap"},
+                ]
+                path = topology.save_topology(topo, name="test")
+                loaded = topology.load_topology(path)
+                self.assertEqual(loaded["nodes"][0]["findings"][0]["cve"],
+                                 "CVE-2021-44228")
+            finally:
+                topology.SAVE_DIR = original
+
+    def test_a_rebuild_keeps_the_findings(self):
+        """A rescan must not throw away what a check already found."""
+        topo = topology.build_topology(self.hosts, gateway="10.0.0.1")
+        topo["nodes"][0]["findings"] = [{"cve": "CVE-1", "cvss": 9.0,
+                                         "severity": "critical"}]
+        again = topology.build_topology(self.hosts, gateway="10.0.0.1",
+                                         previous=topo)
+        self.assertEqual(again["nodes"][0]["findings"][0]["cve"], "CVE-1")
+
+    def test_a_rebuild_keeps_the_detailed_service_names(self):
+        """The product and version a deep scan found are not lost."""
+        topo = topology.build_topology(self.hosts, gateway="10.0.0.1")
+        topo["nodes"][0]["services"] = [{"port": 22, "name": "ssh (OpenSSH 8.4)"}]
+        again = topology.build_topology(self.hosts, gateway="10.0.0.1",
+                                         previous=topo)
+        self.assertEqual(again["nodes"][0]["services"][0]["name"],
+                         "ssh (OpenSSH 8.4)")
+
 
 class RenderTest(unittest.TestCase):
     """The screens must render without a framebuffer present."""

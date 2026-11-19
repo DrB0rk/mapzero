@@ -1,8 +1,8 @@
 """Topology model + on-disk store for MapZero.
 
 The topology is a graph: the gateway is the root, discovered hosts hang off
-it, and every host carries its open ports. It is saved as JSON so a scan can
-be reopened later without re-scanning.
+it, and every host carries its open ports and any vulnerabilities found on
+it. It is saved as JSON so a scan can be reopened later without re-scanning.
 """
 
 import json
@@ -10,7 +10,7 @@ import os
 import time
 
 SAVE_DIR = os.path.expanduser("~/.local/share/mapzero/maps")
-SAVE_FORMAT = 1
+SAVE_FORMAT = 2
 
 
 def _node_from_host(host):
@@ -28,18 +28,34 @@ def _node_from_host(host):
         "mac": host.mac,
         "hostname": host.hostname,
         "services": services,
+        "findings": [],
     }
 
 
-def build_topology(hosts, gateway="", subnet=""):
-    """Build a topology dict from scanned hosts."""
+def build_topology(hosts, gateway="", subnet="", previous=None):
+    """Build a topology dict from scanned hosts.
+
+    `previous` is an earlier topology: its findings and the product and
+    version details are carried over, so a rescan does not throw away what
+    a vulnerability check already learned.
+    """
+    old = {}
+    for node in (previous or {}).get("nodes", []):
+        old[node.get("ip")] = node
+
     nodes = []
     seen = set()
     for host in hosts:
         if host.ip in seen:
             continue
         seen.add(host.ip)
-        nodes.append(_node_from_host(host))
+        node = _node_from_host(host)
+        before = old.get(host.ip)
+        if before:
+            node["findings"] = list(before.get("findings", []))
+            node["services"] = _merge_services(before.get("services", []),
+                                               node["services"])
+        nodes.append(node)
 
     edges = []
     if gateway:
@@ -56,6 +72,25 @@ def build_topology(hosts, gateway="", subnet=""):
         "nodes": nodes,
         "edges": edges,
     }
+
+
+def _merge_services(before, after):
+    """Combine the known services with the ones just detected.
+
+    A service the deep scan found carries a product and a version; the
+    quick scan only knows the port. The richer label wins.
+    """
+    merged = {}
+    for service in before:
+        merged[service.get("port")] = service
+    for service in after:
+        port = service.get("port")
+        known = merged.get(port)
+        if known and len(known.get("name", "")) > len(service.get("name", "")):
+            merged[port] = known
+        else:
+            merged[port] = service
+    return [merged[p] for p in sorted(merged)]
 
 
 def save_dir():

@@ -17,6 +17,9 @@ saves every scan as JSON so it can be reopened later.
   cursor also shows the MAC address of that host.
 - **Topology** - the gateway in the middle, hosts around it on a ring. Networks
   with more than ten hosts get a second, inner ring.
+- **Check for flaws** - a vulnerability scan of the selected host, or of the
+  whole network from the menu. Findings are listed with their CVE and a CVSS
+  score, coloured by severity.
 - **Saved maps** - scans are stored as JSON in `~/.local/share/mapzero/maps` and
   can be reopened (and deleted) from the app.
 
@@ -45,9 +48,13 @@ the columns line up and digits do not jitter.
 | `Right` / `Left` (or `C` / `Z`) | step between the host list and the map |
 | `Enter` | open / confirm |
 | `R` | rescan the network in the background and refresh the view |
+| `V` | check the selected host for known vulnerabilities |
 | `S` | save the current map |
 | `D` | delete the selected saved map (press twice to confirm) |
 | `Esc` | back / quit (during a scan: stop the scan) |
+
+The menu also has **Check whole network**, which runs the same vulnerability
+scan over every host that was found.
 
 The Cardputer Zero has no cursor keys: `F`, `Z`, `X` and `C` sit where a d-pad
 would, and the vendor asks apps to read them as arrows, so both spellings work.
@@ -94,7 +101,9 @@ Optional, `~/.config/mapzero/config.json`:
 {
   "subnet": "192.168.1.0/24",
   "thorough": false,
-  "refresh": 0
+  "refresh": 0,
+  "vuln_engines": ["nmap", "nuclei"],
+  "vuln_timeout": 600
 }
 ```
 
@@ -102,6 +111,36 @@ Optional, `~/.config/mapzero/config.json`:
 scan the top 100 ports instead of a short list of common ones - slower, but it
 finds more services. `refresh` is the auto-refresh interval in seconds; `0`
 (disabled) means the topology only changes when you press `R`.
+`vuln_engines` picks the vulnerability scanners to run; an engine that is not
+installed is skipped. `vuln_timeout` caps a vulnerability scan in seconds.
+
+## Finding vulnerabilities
+
+Two scanners run, and either can be used on its own:
+
+- **nmap** - the `vuln` NSE scripts, which are part of nmap itself, so this
+  works on a bare device. The `vulners` script reports each CVE with its CVSS
+  score. Only scripts marked *safe* are used, so a scan cannot break the
+  service it is testing.
+- **nuclei** - the [nuclei](https://github.com/projectdiscovery/nuclei) binary.
+  It is optional: without it the app runs nmap alone. It also needs a
+  template directory, which is not part of the package:
+
+  ```bash
+  # on the Cardputer Zero
+  mkdir -p ~/.local/bin ~/.config/nuclei-templates
+  curl -sL -o /tmp/nuclei.zip \
+    https://github.com/projectdiscovery/nuclei/releases/download/v3.11.1/nuclei_3.11.1_linux_arm64.zip
+  unzip -q /tmp/nuclei.zip -d ~/.local/bin && chmod +x ~/.local/bin/nuclei
+  # then put templates in ~/.config/nuclei-templates
+  ```
+
+  Note that `/tmp` on the device is a small tmpfs, so the binary and the
+  templates belong on the SD card, not in `/tmp`.
+
+Press `V` on a host to check that host, or pick **Check whole network** from
+the menu to check everything that was found. Findings are shown worst first,
+each with its CVE, a CVSS score and a severity colour.
 
 ## How the scan works
 
