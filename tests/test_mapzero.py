@@ -103,5 +103,53 @@ class RenderTest(unittest.TestCase):
                 os.close(fd)
 
 
+class ScanCmdTest(unittest.TestCase):
+    def test_targets_are_separate_args(self):
+        """nmap must get one target per argv entry.
+
+        Joining targets with ", " makes nmap try to resolve "10.0.0.1," and
+        fail, which silently fell back to scanning every host on its own.
+        """
+        import netscan
+
+        seen = {}
+
+        def fake_run(cmd, timeout=300, cancelled=None):
+            seen["cmd"] = cmd
+            return "<nmaprun></nmaprun>", "", False
+
+        original = netscan._run_cancellable
+        netscan._run_cancellable = fake_run
+        try:
+            netscan.scan_network("10.0.0.0/30")
+        finally:
+            netscan._run_cancellable = original
+        cmd = seen["cmd"]
+        self.assertEqual(cmd[-2:], ["10.0.0.1", "10.0.0.2"])
+        for target in cmd[-2:]:
+            self.assertNotIn(" ", target)
+
+    def test_empty_chunk_is_not_rescanned_host_by_host(self):
+        """A chunk of dead hosts yields no XML, but nmap did not fail.
+
+        Rescanning it host by host turned a 10 s /24 sweep into minutes.
+        """
+        import netscan
+
+        calls = []
+
+        def fake_run(cmd, timeout=300, cancelled=None):
+            calls.append(cmd)
+            return "<nmaprun></nmaprun>", "", False
+
+        original = netscan._run_cancellable
+        netscan._run_cancellable = fake_run
+        try:
+            netscan.scan_network("10.0.0.0/30")
+        finally:
+            netscan._run_cancellable = original
+        self.assertEqual(len(calls), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -10,8 +10,8 @@ nmap XML reference: https://nmap.org/book/man-brief-output.html
 import ipaddress
 import os
 import re
-import socket
 import subprocess
+import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 
@@ -61,6 +61,47 @@ def _run(cmd, timeout=300):
     except (OSError, subprocess.TimeoutExpired):
         return ""
     return out.stdout
+
+
+def _run_cancellable(cmd, timeout=300, cancelled=None):
+    """Run a command, killing it when `cancelled()` becomes true.
+
+    Returns (stdout, stderr, was_cancelled). nmap is stopped with SIGTERM so
+    it does not keep burning CPU on a battery-powered device after the user
+    left the scan screen.
+    """
+    try:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
+    except OSError:
+        return "", "", False
+
+    was_cancelled = False
+    deadline = time.time() + timeout if timeout else None
+    try:
+        while True:
+            try:
+                out, err = proc.communicate(timeout=0.5)
+                return out, err, was_cancelled
+            except subprocess.TimeoutExpired:
+                if cancelled is not None and cancelled():
+                    was_cancelled = True
+                    proc.terminate()
+                    try:
+                        out, err = proc.communicate(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        out, err = proc.communicate()
+                    return out, err, True
+                if deadline and time.time() > deadline:
+                    proc.kill()
+                    out, err = proc.communicate()
+                    return out, err, False
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
 
 
 def local_addresses():
@@ -176,12 +217,24 @@ def _chunk_hosts(network, size):
         yield hosts[i : i + size]
 
 
-def scan_network(cidr: str, thorough: bool = False, timeout=180, progress=None):
+def _nmap_refused_targets(stderr: str) -> bool:
+    """True when nmap complained about the target list itself.
+
+    An empty result set is normal (a chunk of dead hosts), so only a real
+    resolution error justifies rescanning the chunk host by host.
+    """
+    return "Failed to resolve" in stderr or "Error resolving" in stderr
+
+
+def scan_network(cidr: str, thorough: bool = False, timeout=180, progress=None,
+                 cancelled=None):
     """Scan a CIDR and return (hosts, error).
 
     `hosts` is a list of Host. `error` is "" on success or a message the UI
     can show (missing nmap, timeout, ...). `progress` is an optional callable
     invoked with a human-readable status string after every chunk.
+    `cancelled` is an optional callable; when it returns True the running
+    nmap is terminated and the scan stops.
     """
     if not os.path.exists("/usr/bin/" + NMAP) and not _which(NMAP):
         return [], "nmap is not installed (apt install nmap)"
@@ -191,48 +244,43 @@ def scan_network(cidr: str, thorough: bool = False, timeout=180, progress=None):
     except ValueError as exc:
         return [], "bad subnet: %s" % exc
 
+    def stopped():
+        return cancelled is not None and cancelled()
+
     chunks = list(_chunk_hosts(network, CHUNK_SIZE))
     hosts = []
     for index, chunk in enumerate(chunks):
+        if stopped():
+            return hosts, "scan cancelled"
         if progress:
             progress("scanning %s (%d/%d)" % (cidr, index + 1, len(chunks)))
-        cmd = [NMAP, "-sT", "-n", "-Pn", "--max-retries", "0",
+        cmd = [NMAP, "-sT", "-n", "--max-retries", "0",
                "--host-timeout", "30s"]
         if thorough:
             cmd += ["--top-ports", "100"]
         else:
             cmd += ["-p", QUICK_PORTS]
-        cmd += ["-oX", "-", ", ".join(str(h) for h in chunk)]
-        found = parse_nmap_xml(_run(cmd, timeout=timeout))
-        if not found:
-            # Some nmap builds refuse host lists with commas; retry one by one.
+        cmd += ["-oX", "-"] + [str(h) for h in chunk]
+        out, err, was_cancelled = _run_cancellable(cmd, timeout=timeout,
+                                                   cancelled=stopped)
+        if was_cancelled:
+            return hosts, "scan cancelled"
+        found = parse_nmap_xml(out)
+        if not found and _nmap_refused_targets(err):
+            # nmap could not use the target list; retry one host at a time.
             found = []
             for host in chunk:
-                single = cmd[:-1] + [str(host)]
-                found += parse_nmap_xml(_run(single, timeout=60))
+                if stopped():
+                    return hosts, "scan cancelled"
+                single = cmd[:-len(chunk)] + [str(host)]
+                out, err, was_cancelled = _run_cancellable(single, timeout=60,
+                                                           cancelled=stopped)
+                if was_cancelled:
+                    return hosts, "scan cancelled"
+                found += parse_nmap_xml(out)
         hosts += found
 
     return hosts, ""
-
-
-def scan_host(ip: str, timeout=120):
-    """Detail scan of a single host: version detection on all ports."""
-    cmd = [NMAP, "-sT", "-n", "-Pn", "--max-retries", "0",
-           "-sV", "--version-light", "-p", "1-1024", "-oX", "-", ip]
-    hosts = parse_nmap_xml(_run(cmd, timeout=timeout))
-    return hosts[0] if hosts else Host(ip=ip)
-
-
-def reverse_lookup(ip: str, timeout=1.5):
-    """Best-effort reverse DNS. Returns "" when it does not resolve."""
-    old = socket.getdefaulttimeout()
-    try:
-        socket.setdefaulttimeout(timeout)
-        return socket.gethostbyaddr(ip)[0]
-    except (OSError, socket.herror, socket.gaierror):
-        return ""
-    finally:
-        socket.setdefaulttimeout(old)
 
 
 def _which(name):

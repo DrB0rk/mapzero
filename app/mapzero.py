@@ -57,6 +57,7 @@ KEY_Z = 44
 KEY_C = 46
 KEY_S = 31
 KEY_D = 32
+KEY_R = 19
 
 BG = (16, 18, 22)
 FG = (222, 226, 232)
@@ -153,24 +154,37 @@ def read_keycodes(fds, timeout=0.15):
 
 
 class Scanner:
-    """Runs an nmap scan in a thread and reports progress."""
+    """Runs an nmap scan in a thread and reports progress.
+
+    `cancel()` stops the scan: the running nmap is terminated and no further
+    chunks are started.
+    """
 
     def __init__(self):
         self.hosts = []
         self.error = ""
         self.done = False
         self.progress = ""
+        self.cancelled = False
         self._thread = None
 
     def start(self, cidr, thorough=False):
         self.hosts = []
         self.error = ""
         self.done = False
+        self.cancelled = False
         self.progress = "scanning %s" % cidr
         self._thread = threading.Thread(
             target=self._run, args=(cidr, thorough), daemon=True
         )
         self._thread.start()
+
+    def cancel(self):
+        """Ask the running scan to stop."""
+        self.cancelled = True
+
+    def is_cancelled(self):
+        return self.cancelled
 
     def _set_progress(self, text):
         self.progress = text
@@ -178,7 +192,10 @@ class Scanner:
     def _run(self, cidr, thorough):
         try:
             hosts, error = netscan.scan_network(
-                cidr, thorough=thorough, progress=self._set_progress
+                cidr,
+                thorough=thorough,
+                progress=self._set_progress,
+                cancelled=self.is_cancelled,
             )
         except Exception as exc:  # keep the UI alive on any scan failure
             self.error = str(exc)
@@ -204,6 +221,9 @@ class App:
         self.subnet = ""
         self.status = ""
         self.error = ""
+        self.silent_scan = False
+        self.refresh_interval = int(read_config().get("refresh", 0) or 0)
+        self.last_refresh = time.time()
         self.scanner = Scanner()
         self.fd = None
         self.mm = None
@@ -232,8 +252,8 @@ class App:
                       right, font=self.font_sm, fill=DIM)
 
     def footer(self, draw, text):
-        draw.line([(0, H - 13), (W - 1, H - 13)], fill=(40, 44, 50))
-        draw.text((5, H - 12), text, font=self.font_sm, fill=DIM)
+        draw.line([(0, H - 14), (W - 1, H - 14)], fill=(40, 44, 50))
+        draw.text((5, H - 13), text, font=self.font_sm, fill=DIM)
 
     def draw_menu(self):
         img = self.new_image()
@@ -257,8 +277,9 @@ class App:
         self.header(d, "Scanning", self.subnet)
         d.text((10, 40), self.scanner.progress or "starting nmap...", font=self.font,
                fill=FG)
-        d.text((10, 62), "nmap is running. Esc cancels.", font=self.font_sm, fill=DIM)
-        self.footer(d, "Esc cancel")
+        d.text((10, 62), "nmap is running. Esc cancels the scan.",
+               font=self.font_sm, fill=DIM)
+        self.footer(d, "Esc cancel scan")
         return img
 
     def draw_hosts(self):
@@ -269,15 +290,17 @@ class App:
         rows = 8
         y = 22
         for node in nodes[self.scroll:self.scroll + rows]:
-            name = node["hostname"] or node["ip"]
-            d.text((6, y), name[:22], font=self.font_sm, fill=FG)
-            d.text((170, y), node["ip"], font=self.font_sm, fill=DIM)
-            svc = ",".join(str(s["port"]) for s in node["services"][:6])
-            d.text((258, y), svc, font=self.font_sm, fill=OK)
+            d.text((6, y), node["ip"], font=self.font_sm, fill=FG)
+            mac = (node.get("mac") or "")[:17]
+            d.text((62, y), mac, font=self.font_sm, fill=DIM)
+            svc = ",".join(str(s["port"]) for s in node["services"][:8])
+            d.text((160, y), svc, font=self.font_sm, fill=OK)
             y += 15
         if not nodes:
             d.text((10, 60), "no hosts found", font=self.font, fill=DIM)
-        self.footer(d, "Enter map   S save   Esc back")
+        if self.status:
+            d.text((6, H - 26), self.status[:40], font=self.font_sm, fill=DIM)
+        self.footer(d, "Enter map   R rescan   S save   Esc back")
         return img
 
     def draw_map(self):
@@ -322,7 +345,9 @@ class App:
                     ly = y - 14
                 d.text((lx, ly), label, font=self.font_sm, fill=FG)
 
-        self.footer(d, "Esc back   S save")
+        if self.status:
+            d.text((6, H - 26), self.status[:40], font=self.font_sm, fill=DIM)
+        self.footer(d, "Esc back   R rescan   S save")
         return img
 
     def draw_maps(self):
@@ -354,7 +379,9 @@ class App:
 
     # ---------------- actions ----------------
 
-    def start_scan(self):
+    def start_scan(self, silent=False):
+        """Start a scan. A silent scan keeps the current screen and only
+        replaces the topology when it finishes."""
         config = read_config()
         subnet = config.get("subnet") or netscan.local_cidr()
         if not subnet:
@@ -364,9 +391,15 @@ class App:
         self.gateway = netscan.gateway_ip()
         self.error = ""
         self.scanner.start(subnet, thorough=bool(config.get("thorough")))
-        self.screen = "scanning"
+        self.silent_scan = silent
+        if not silent:
+            self.screen = "scanning"
 
     def finish_scan(self):
+        if self.scanner.cancelled:
+            self.error = "scan cancelled"
+            self.screen = "menu"
+            return
         if self.scanner.error:
             self.error = self.scanner.error
             self.screen = "menu"
@@ -376,6 +409,31 @@ class App:
         )
         self.scroll = 0
         self.screen = "hosts"
+
+    def apply_silent_scan(self):
+        """Fold a background rescan into the current view."""
+        self.silent_scan = False
+        self.scanner.done = False
+        if self.scanner.cancelled or self.scanner.error:
+            return
+        self.topo = topology.build_topology(
+            self.scanner.hosts, gateway=self.gateway, subnet=self.subnet
+        )
+        self.status = "updated %s" % time.strftime("%H:%M:%S")
+
+    def maybe_auto_refresh(self):
+        """Rescan on a timer when the user enabled a refresh interval."""
+        interval = self.refresh_interval
+        if not interval or self.screen not in ("hosts", "map"):
+            return
+        if self.scanner.progress and not self.scanner.done:
+            return  # a scan is already running
+        now = time.time()
+        if now - self.last_refresh < interval:
+            return
+        self.last_refresh = now
+        self.start_scan(silent=True)
+        self.status = "auto-refreshing..."
 
     def save_current(self):
         if not self.topo:
@@ -401,9 +459,15 @@ class App:
             if self.screen == "scanning":
                 if self.scanner.done:
                     self.finish_scan()
-                if KEY_ESC in codes:
+                elif KEY_ESC in codes:
+                    # Stop the nmap child, then leave the screen.
+                    self.scanner.cancel()
+                    self.error = "scan cancelled"
                     self.screen = "menu"
                 continue
+            if self.scanner.done and self.silent_scan:
+                self.apply_silent_scan()
+            self.maybe_auto_refresh()
             if not codes:
                 continue
 
@@ -448,12 +512,18 @@ class App:
             self.screen = "map"
         elif code == KEY_S:
             self.save_current()
+        elif code == KEY_R:
+            self.start_scan(silent=True)
+            self.status = "rescanning..."
         elif code == KEY_ESC:
             self.screen = "menu"
 
     def map_keys(self, code):
         if code == KEY_S:
             self.save_current()
+        elif code == KEY_R:
+            self.start_scan(silent=True)
+            self.status = "rescanning..."
         elif code in (KEY_ESC, KEY_ENTER):
             self.screen = "hosts"
 

@@ -17,10 +17,10 @@
     ],
     "icon": "packaging/icon.png",
     "license": "MIT",
-    "source_repo": "https://github.com/yourname/mapzero",
+    "source_repo": "https://github.com/drb0rk/mapzero",
     "author": {
-      "github": "yourname",
-      "display_name": "Your Name"
+      "github": "drb0rk",
+      "display_name": "DrB0rk"
     },
     "share_code": "MPZ0",
     "permissions": {
