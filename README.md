@@ -25,9 +25,13 @@ saves every scan as JSON so it can be reopened later.
 | --- | --- |
 | `Up` / `Down` (or `Z` / `X`) | move |
 | `Enter` | select / open the topology view |
+| `R` | rescan the network in the background and refresh the view |
 | `S` | save the current map |
 | `D` | delete the selected saved map |
-| `Esc` | back / quit |
+| `Esc` | back / quit (during a scan: stop the scan) |
+
+`Esc` during a scan really stops it - the running nmap process is terminated,
+not just hidden.
 
 ## Install on the device
 
@@ -62,13 +66,15 @@ Optional, `~/.config/mapzero/config.json`:
 ```json
 {
   "subnet": "192.168.1.0/24",
-  "thorough": false
+  "thorough": false,
+  "refresh": 0
 }
 ```
 
 `subnet` overrides the automatically detected network. `thorough` makes nmap
 scan the top 100 ports instead of a short list of common ones - slower, but it
-finds more services.
+finds more services. `refresh` is the auto-refresh interval in seconds; `0`
+(disabled) means the topology only changes when you press `R`.
 
 ## How the scan works
 
@@ -76,12 +82,14 @@ Discovery uses an **unprivileged TCP connect scan** (`nmap -sT`), so no root is
 needed:
 
 ```
-nmap -sT -n -Pn --max-retries 0 --host-timeout 30s -p 22,23,53,80,443,445,554,8080,8443 -oX - <hosts>
+nmap -sT -n --max-retries 0 --host-timeout 30s -p 22,23,53,80,443,445,554,8080,8443 -oX - <host> <host> ...
 ```
 
 The subnet is split into chunks of 64 hosts so the progress display advances
-and one slow host cannot stall the whole scan. nmap's XML output is parsed into
-hosts, ports, services and (from the kernel ARP cache) MAC addresses.
+and one slow host cannot stall the whole scan. Each host is passed as its own
+argument - nmap cannot parse a comma-separated list, and trying to made it scan
+every host on its own. nmap's XML output is parsed into hosts, ports,
+services and (from the kernel ARP cache) MAC addresses.
 
 ## Layout
 

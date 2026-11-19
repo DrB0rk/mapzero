@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "app"))
 
@@ -149,6 +150,26 @@ class ScanCmdTest(unittest.TestCase):
         finally:
             netscan._run_cancellable = original
         self.assertEqual(len(calls), 1)
+
+
+class FramebufferTest(unittest.TestCase):
+    def test_mismatched_framebuffer_is_refused(self):
+        """The app must not draw 320x170 into an arbitrary framebuffer."""
+        import mapzero
+
+        class FakeFd:
+            pass
+
+        with unittest.mock.patch("os.open", return_value=FakeFd()), \
+                unittest.mock.patch("fcntl.ioctl") as ioctl:
+            def fake_ioctl(fd, request, buf, mutate):
+                import struct
+                struct.pack_into("=II", buf, 0, 1920, 1080)
+                return 0
+
+            ioctl.side_effect = fake_ioctl
+            with self.assertRaises(OSError):
+                mapzero.check_framebuffer(FakeFd())
 
 
 if __name__ == "__main__":

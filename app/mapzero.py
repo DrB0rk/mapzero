@@ -34,6 +34,7 @@ import topology
 FB_DEV = "/dev/fb0"
 W, H = 320, 170
 BPP = 2
+FBIOGET_VSCREENINFO = 0x4600
 
 FONT_PATHS = (
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -206,6 +207,26 @@ class Scanner:
         self.done = True
 
 
+def check_framebuffer(fd):
+    """Refuse to draw on a framebuffer that is not the device's 320x170 panel.
+
+    Writing 320x170 of pixels into an arbitrary framebuffer corrupts whatever
+    else is using it, so fail loudly instead.
+    """
+    try:
+        import fcntl
+        import struct as _struct
+        buf = bytearray(160)
+        fcntl.ioctl(fd, FBIOGET_VSCREENINFO, buf, True)
+        xres, yres = _struct.unpack("=II", bytes(buf[:8]))
+    except OSError:
+        return  # cannot query: trust the device
+    if (xres, yres) != (W, H):
+        raise OSError(
+            "%s is %dx%d, expected %dx%d" % (FB_DEV, xres, yres, W, H)
+        )
+
+
 class App:
     def __init__(self, fb_path=FB_DEV):
         self.font = load_font(13)
@@ -229,6 +250,7 @@ class App:
         self.mm = None
         if fb_path is not None:
             self.fd = os.open(fb_path, os.O_RDWR)
+            check_framebuffer(self.fd)
             self.mm = mmap.mmap(self.fd, W * H * BPP, mmap.MAP_SHARED,
                                 mmap.PROT_WRITE | mmap.PROT_READ)
         self.input_fds = open_input_devices()
@@ -546,7 +568,7 @@ def main():
     try:
         app = App()
     except OSError as exc:
-        print("mapzero: cannot open %s: %s" % (FB_DEV, exc), file=sys.stderr)
+        print("mapzero: %s" % exc, file=sys.stderr)
         return 3
     try:
         app.run()

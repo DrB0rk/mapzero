@@ -6,7 +6,7 @@
   "description": "Network topology mapper: scans the local network with nmap, draws the topology and saves it",
   "store": {
     "summary": "Map your local network topology with nmap, view it and save it",
-    "description": "MapZero scans the network the Cardputer Zero is attached to, using nmap, and turns the result into a topology map.\n\n**Scan** - discovers hosts on the local subnet and the services they expose. The scan runs in the background, so the screen stays responsive; press Esc to cancel.\n\n**Topology** - the gateway sits in the middle, every discovered host is drawn around it with its name and open ports. On busy networks the hosts are laid out on two rings so the labels stay readable.\n\n**Saved maps** - every scan can be saved as JSON under ~/.local/share/mapzero/maps and reopened later without scanning again.\n\nOnly scan networks you own or are authorised to test.",
+    "description": "MapZero scans the network the Cardputer Zero is attached to, using nmap, and turns the result into a topology map.\n\n**Scan** - discovers hosts on the local subnet and the services they expose. The scan runs in the background, so the screen stays responsive; press Esc to cancel (the nmap process is really stopped).\n\n**Refresh** - press R to rescan at any time; the topology is replaced in place as soon as the new scan finishes. Set \"refresh\" in the config file to rescan automatically on an interval.\n\n**Topology** - the gateway sits in the middle, every discovered host is drawn around it with its name and open ports. On busy networks the hosts are laid out on two rings so the labels stay readable.\n\n**Saved maps** - every scan can be saved as JSON under ~/.local/share/mapzero/maps and reopened later without scanning again.\n\nOnly scan networks you own or are authorised to test.",
     "categories": [
       "Security",
       "System Tools"
@@ -17,9 +17,9 @@
     ],
     "icon": "packaging/icon.png",
     "license": "MIT",
-    "source_repo": "https://github.com/drb0rk/mapzero",
+    "source_repo": "https://github.com/DrB0rk/mapzero",
     "author": {
-      "github": "drb0rk",
+      "github": "DrB0rk",
       "display_name": "DrB0rk"
     },
     "share_code": "MPZ0",
